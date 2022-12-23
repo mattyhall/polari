@@ -27,10 +27,13 @@
       let
         pkgs = import nixpkgs { inherit system; };
         zigLatest = zig.packages.${system}.master-2022-12-21;
+        gems = pkgs.ruby.withPackages (ps: with ps; [ rouge ]);
         inherit (gitignore.lib) gitignoreSource;
       in
         rec {
           packages = rec {
+            default = polaric;
+
             polaric = pkgs.stdenvNoCC.mkDerivation {
               name = "polaric";
               version = "master";
@@ -44,7 +47,19 @@
               '';
               XDG_CACHE_HOME = ".cache";
             };
-            default = polaric;
+            
+            docs = pkgs.stdenvNoCC.mkDerivation {
+              name = "docs";
+              version = "master";
+              src = gitignoreSource ./docs;
+              nativeBuildInputs = [ pkgs.asciidoctor gems ];
+              dontConfigure = true;
+              dontInstall = true;
+              buildPhase = ''
+                mkdir -p $out
+                asciidoctor -D $out *.adoc
+              '';
+            };
           };
 
           checks = {
@@ -68,6 +83,7 @@
               zls.packages.${system}.default
               bashInteractive
               gdb
+              asciidoctor
             ]);
           };
         }

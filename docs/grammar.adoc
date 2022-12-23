@@ -1,0 +1,34 @@
+= Grammar
+
+:source-highlighter: rouge
+
+[source,ebnf]
+----
+statement = (assignment | expression) , ";";
+
+op = "+" | "-" | "*" | "/";
+
+number = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" , { number };
+
+letterUpper = "A" | "B" | "C" | "D" | "E" | "F" | "G"
+            | "H" | "I" | "J" | "K" | "L" | "M" | "N"
+            | "O" | "P" | "Q" | "R" | "S" | "T" | "U"
+            | "V" | "W" | "X" | "Y" | "Z" ;
+letterLower = "a" | "b" | "c" | "d" | "e" | "f" | "g"
+            | "h" | "i" | "j" | "k" | "l" | "m" | "n"
+            | "o" | "p" | "q" | "r" | "s" | "t" | "u"
+            | "v" | "w" | "x" | "y" | "z" ;
+letter = letterUpper | letterLower;
+
+identifier = letter , { letter | number | "-" };
+
+expression = num | binOp | function | application | ( "(" , expression , ")" );
+
+binOp = number , op , expression;
+
+assignment = identifier , "=" , expression;
+
+function = "fn" , { expression } , "=>" , expression;
+application = identifier , { expression };
+
+----

@@ -1,0 +1,113 @@
+= Examples
+
+Here are some examples of polari. As we are in development it may or may not be
+implemented.
+
+:toc:
+
+== Types
+=== Basic
+
+[source]
+----
+// Comments can be one line
+/*
+  Or multiple
+  /* And nested */
+*/
+
+i : Int; // Types always start with a capital
+i = 10; // Lines always end with a '.'
+
+sum : Int;
+sum = i * 5 + 3 - 1;
+
+/// comments with three slashes are documentation
+b : Bool;
+b = true;
+
+s1 : String;
+s1 = "Hello";
+
+// Types can be inferred
+s2 = `
+This
+Is
+A
+Multiline
+String	
+`;
+
+// Interpolation is done with ${..}
+s3 = "${s1}, world";
+
+// A '?' before a type makes it optional
+opt1 : ?Int;
+opt2 = None;
+
+opt2 = Some 10;
+
+// A '!' denotes a Result type. The type of the left is the error, the type on
+// the right is the success.
+res1 : String!Int;
+res1 = Err "not defined";
+
+res2 = Ok 10;
+----
+
+=== Functions
+
+[source]
+----
+f : fn Int Int => Int;
+f = fn a b => a + b;
+
+f 10 20; // => 30
+
+// Functions are curried
+g = f 10;
+g 20; // => 30
+
+h : fn (fn Int Int => Int) Int => fn Int => Int;
+h = fn op x => fn y => op x y;
+
+(h (+) 3) 10;
+----
+
+=== Records
+
+[source]
+----
+A : record { i : int; b : bool; };
+
+a : A
+a = record { i = 10; b = true; };
+a.i; // => 10
+
+// a | b can be used to update fields in a with the values in b
+a | { i = 20; }; // => record { i = 20; b = true }
+
+// It can also be used to insert fields
+a | { x = "hi"; }; // => record { i = 10; b = true; x = "hi"; }
+                   // type is record { i: Int; b : Bool; x : String; }
+
+// Can also use '|' to combine types
+B : record { s : string }
+
+c : A|B
+c = record { a = 10; b = true; s = "hello"; };
+----
+
+
+== Statements
+
+=== Let .. in
+
+[source]
+---
+foo = let
+  a = 10;
+  b = 20;
+in
+  a + b;
+---
