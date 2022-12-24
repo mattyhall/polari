@@ -32,7 +32,7 @@ pub const Expression = union(enum) {
 pub const BinaryOperation = enum { plus, minus, multiply, divide };
 
 /// UnaryOperation represents operators taking one argument, e.g. negation.
-pub const UnaryOperation = enum { negate };
+pub const UnaryOperation = enum { negate, grouping };
 
 pub const Statement = union(enum) {
     assignment: struct { identifier: []const u8, expression: *Expression },
@@ -92,17 +92,18 @@ pub const Lexer = union(enum) {
 /// NOTE: rhs must not be the same as lhs. rhs > lhs gives left associativity, lhs < rhs gives right associativity.
 fn infixBindingPower(op: BinaryOperation) struct { lhs: u8, rhs: u8 } {
     return switch (op) {
-        .minus => .{ .lhs = 10, .rhs = 11 },
-        .plus => .{ .lhs = 30, .rhs = 31 },
-        .multiply => .{ .lhs = 50, .rhs = 51 },
-        .divide => .{ .lhs = 70, .rhs = 71 },
+        .minus => .{ .lhs = 30, .rhs = 31 },
+        .plus => .{ .lhs = 70, .rhs = 71 },
+        .multiply => .{ .lhs = 110, .rhs = 111 },
+        .divide => .{ .lhs = 150, .rhs = 151 },
     };
 }
 
 /// prefixBindingPower returns the power of the prefix operator op.
 fn prefixBindingPower(op: UnaryOperation) u8 {
     return switch (op) {
-        .negate => 91,
+        .negate => 191,
+        .grouping => 1,
     };
 }
 
@@ -146,7 +147,7 @@ pub const Parser = struct {
     fn expect(self: *Parser, comptime tok: lexer.Tok) Error!void {
         switch (tok) {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
-            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon => {},
+            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
         }
 
         const tokloc = try self.pop();
@@ -160,10 +161,16 @@ pub const Parser = struct {
         const lhs_tokloc = try self.pop();
         var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| try self.program.create(Expression{ .integer = n }),
-            .minus => b: {
-                const bp = prefixBindingPower(.negate);
+            .minus, .left_paren => b: {
+                const op: UnaryOperation = switch (lhs_tokloc.tok) {
+                    .minus => .negate,
+                    .left_paren => .grouping,
+                    else => unreachable,
+                };
+                const bp = prefixBindingPower(op);
                 const e = try self.parseExpression(bp);
-                break :b try self.program.create(Expression{ .unaryop = .{ .op = .negate, .e = e } });
+                if (op == .grouping) try self.expect(.right_paren);
+                break :b try self.program.create(Expression{ .unaryop = .{ .op = op, .e = e } });
             },
             else => |tok| {
                 try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected integer, got {}", .{tok});
@@ -184,6 +191,8 @@ pub const Parser = struct {
                 .forward_slash => BinaryOperation.divide,
 
                 .semicolon => return lhs,
+
+                .right_paren => return lhs,
 
                 else => {
                     try self.allocDiag(
@@ -319,6 +328,26 @@ const Tests = struct {
                     },
                 }),
                 .rhs = try e(a, .{ .integer = 2 }),
+            } },
+        );
+
+        try expectEqualParse(
+            &.{ .left_paren, .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .right_paren, .forward_slash, .{ .integer = 3 }, .semicolon },
+            .{ .binop = .{
+                .op = .divide,
+                .lhs = try e(a, .{
+                    .unaryop = .{
+                        .op = .grouping,
+                        .e = try e(a, .{
+                            .binop = .{
+                                .op = .multiply,
+                                .lhs = try e(a, .{ .integer = 1 }),
+                                .rhs = try e(a, .{ .integer = 2 }),
+                            },
+                        }),
+                    },
+                }),
+                .rhs = try e(a, .{ .integer = 3 }),
             } },
         );
     }

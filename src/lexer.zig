@@ -26,6 +26,8 @@ pub const Tok = union(enum) {
     asterisk,
 
     semicolon,
+    left_paren,
+    right_paren,
 };
 
 /// Loc represents a locaiton in the source code. It is in a human-readable format - i.e. line and col start at 1.
@@ -169,6 +171,8 @@ pub const Lexer = struct {
             '/' => self.tokloc(.forward_slash),
             '*' => self.tokloc(.asterisk),
             ';' => self.tokloc(.semicolon),
+            '(' => self.tokloc(.left_paren),
+            ')' => self.tokloc(.right_paren),
             else => {
                 if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return try self.parseIdentifier();
 
@@ -246,7 +250,7 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
         switch (item_actual) {
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
-            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon => continue,
+            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
         }
 
         std.debug.print("at index {}: expected {}, got {}\n", .{ i, item_expected, item_actual });
@@ -276,14 +280,16 @@ test "integers" {
 }
 
 test "maths" {
-    try expectLex(testing.allocator, "x = 5 * 3 - 2", &.{
+    try expectLex(testing.allocator, "x = 5 * (3 - 2)", &.{
         .{ .identifier = "x" },
         .equals,
         .{ .integer = 5 },
         .asterisk,
+        .left_paren,
         .{ .integer = 3 },
         .minus,
         .{ .integer = 2 },
+        .right_paren,
     });
 }
 

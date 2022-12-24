@@ -72,6 +72,7 @@ fn DotWriter(comptime W: anytype) type {
                     const child_id = try self.writeExpression(unaryop.e);
                     const op = switch (unaryop.op) {
                         .negate => "-",
+                        .grouping => "()",
                     };
 
                     try self.w.print(
