@@ -6,7 +6,9 @@ const simargs = @import("simargs");
 
 pub const log_level: std.log.Level = .info;
 
-pub const Opts = struct {};
+pub const Opts = struct {
+    @"dump-ast": bool = false,
+};
 
 fn readStdin(gpa: std.mem.Allocator) ![]const u8 {
     var stdin = std.io.getStdIn();
@@ -25,6 +27,85 @@ fn readFile(gpa: std.mem.Allocator, path: []const u8) ![]const u8 {
     defer f.close();
 
     return try f.reader().readAllAlloc(gpa, 10 * 1024 * 1024);
+}
+
+fn DotWriter(comptime W: anytype) type {
+    return struct {
+        next_id: u64 = 0,
+        w: W,
+
+        const Self = @This();
+
+        fn id(self: *Self) u64 {
+            self.next_id += 1;
+            return self.next_id - 1;
+        }
+
+        fn writeExpression(self: *Self, expression: *const parser.Expression) !u64 {
+            const e_id = self.id();
+
+            switch (expression.*) {
+                .integer => |i| {
+                    try self.w.print(
+                        \\  e_{} [label="{}"]
+                        \\
+                    , .{ e_id, i });
+                },
+                .binop => |binop| {
+                    const lhs_id = try self.writeExpression(binop.lhs);
+                    const rhs_id = try self.writeExpression(binop.rhs);
+                    const op = switch (binop.op) {
+                        .plus => "+",
+                        .minus => "-",
+                        .multiply => "*",
+                        .divide => "/",
+                    };
+
+                    try self.w.print(
+                        \\  e_{[e_id]} [label="{[op]s}"]
+                        \\  e_{[e_id]} -- e_{[lhs_id]}
+                        \\  e_{[e_id]} -- e_{[rhs_id]}
+                        \\
+                    , .{ .e_id = e_id, .lhs_id = lhs_id, .rhs_id = rhs_id, .op = op });
+                },
+            }
+
+            return e_id;
+        }
+
+        fn write(self: *Self, program: *const parser.Program) !void {
+            try self.w.writeAll(
+                \\strict graph {
+                \\
+            );
+
+            for (program.stmts.items) |stmt| {
+                switch (stmt) {
+                    .assignment => |a| {
+                        const e_id = try self.writeExpression(a.expression);
+                        const s_id = self.id();
+                        const i_id = self.id();
+                        try self.w.print(
+                            \\  i_{[i_id]} [label="{[name]s}"]
+                            \\  s_{[s_id]} [label="="]
+                            \\  s_{[s_id]} -- i_{[i_id]}
+                            \\  s_{[s_id]} -- {[e_id]}
+                            \\  root -- s_{[s_id]}
+                        , .{ .i_id = i_id, .s_id = s_id, .e_id = e_id, .name = a.identifier });
+                    },
+                    .expression => |e| {
+                        const e_id = try self.writeExpression(e);
+                        try self.w.print(
+                            \\  root -- e_{}
+                            \\
+                        , .{e_id});
+                    },
+                }
+            }
+
+            try self.w.writeAll("}");
+        }
+    };
 }
 
 pub fn main() !void {
@@ -56,11 +137,16 @@ pub fn main() !void {
 
         std.os.exit(1);
     };
-    program.deinit();
+    defer program.deinit();
+
+    if (opts.args.@"dump-ast") {
+        var w = std.io.getStdOut().writer();
+        try (DotWriter(@TypeOf(w)){ .w = w }).write(&program);
+    }
 }
 
-const Self = @This();
+const This = @This();
 
 test "all" {
-    std.testing.refAllDeclsRecursive(Self);
+    std.testing.refAllDeclsRecursive(This);
 }

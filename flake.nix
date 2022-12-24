@@ -84,6 +84,7 @@
               bashInteractive
               gdb
               asciidoctor
+              graphviz
             ]);
           };
         }
