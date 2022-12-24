@@ -157,6 +157,7 @@ pub const Parser = struct {
         return error.UnexpectedToken;
     }
 
+    /// parseStatement parses a single statement.
     fn parseStatement(self: *Parser) Error!Statement {
         const lhs_tokloc = try self.pop();
 
@@ -177,6 +178,9 @@ pub const Parser = struct {
         };
     }
 
+    /// parseAssignments parses an assignment.
+    ///
+    /// NOTE: does not parse the trailing semicolon.
     fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Statement {
         try self.expect(.equals);
 
@@ -190,11 +194,16 @@ pub const Parser = struct {
         return Statement{ .assignment = .{ .identifier = lhs.tok.identifier, .expression = rhs } };
     }
 
+    /// parseExpression parses a single expression.
+    ///
+    /// NOTE: does not parse the trailing semicolon.
     fn parseExpression(self: *Parser, min_bp: u8) Error!*Expression {
         const lhs_tokloc = try self.pop();
         return try self.parseExpressionLhs(min_bp, lhs_tokloc);
     }
 
+    /// parseExpressionLhs parses an expression but requires the caller to pass the first token (the lhs) of the
+    /// expression. It uses Pratt parsing to handle precedence.
     fn parseExpressionLhs(self: *Parser, min_bp: u8, lhs_tokloc: TokLoc) Error!*Expression {
         var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| try self.program.create(Expression{ .integer = n }),
@@ -252,6 +261,7 @@ pub const Parser = struct {
         }
     }
 
+    /// parse takes tokens from the lexer and parses them into a program.
     pub fn parse(self: *Parser) Error!Program {
         errdefer self.program.deinit();
 
@@ -261,11 +271,13 @@ pub const Parser = struct {
         return self.program;
     }
 
+    /// getDiag returns the Diag of the parser or, if there isn't one, that of the lexer.
     pub fn getDiag(self: *const Parser) ?Diag {
         if (self.diag) |d| return d;
         return self.lexer.getDiag();
     }
 
+    /// deinit deallocates parser.
     pub fn deinit(self: *Parser) void {
         if (self.diag) |*d| d.deinit();
     }
