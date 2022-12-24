@@ -210,6 +210,7 @@ pub const Parser = struct {
         errdefer self.program.deinit();
 
         const expr = try self.parseExpression(0);
+        try self.expect(.semicolon);
         try self.program.stmts.append(self.program.arena.allocator(), .{ .expression = expr });
 
         return self.program;
@@ -238,6 +239,14 @@ fn expectEqualParse(toks: []const lexer.Tok, expected: Expression) !void {
     try testing.expectEqual(@intCast(usize, 1), actual.stmts.items.len);
 
     if (!actual.stmts.items[0].expression.eql(&expected)) return error.TestExpectedEquals;
+}
+
+fn expectFailParse(expected: anyerror, toks: []const lexer.Tok) !void {
+    var l = Lexer{ .fake = lexer.Fake{ .toks = toks } };
+    var parser = Parser.init(testing.allocator, l);
+    defer parser.deinit();
+
+    try testing.expectError(expected, parser.parse());
 }
 
 const Tests = struct {
@@ -312,6 +321,12 @@ const Tests = struct {
                 .rhs = try e(a, .{ .integer = 2 }),
             } },
         );
+    }
+
+    test "fail: maths" {
+        try expectFailParse(error.EndOfFile, &.{.{ .integer = 1 }});
+        try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .plus, .plus });
+        try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .plus, .{ .integer = 3 }, .equals });
     }
 };
 
