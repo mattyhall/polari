@@ -169,7 +169,11 @@ pub const Parser = struct {
 
         const op_tokloc = try self.peek();
         return switch (op_tokloc.tok) {
-            .equals => try self.parseAssignment(lhs_tokloc),
+            .equals => b: {
+                var ass = try self.parseAssignment(lhs_tokloc);
+                try self.expect(.semicolon);
+                break :b ass;
+            },
             else => b: {
                 var expr = try self.parseExpressionLhs(0, lhs_tokloc);
                 try self.expect(.semicolon);
@@ -459,6 +463,7 @@ const Tests = struct {
 
     test "fail: assignments" {
         try expectFailParse(error.UnexpectedToken, &.{.equals});
+        try expectFailParse(error.EndOfFile, &.{ .{ .identifier = "a" }, .equals, .{ .integer = 1 } });
         try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .equals, .{ .integer = 3 }, .semicolon });
         try expectFailParse(error.UnexpectedToken, &.{
             .{ .identifier = "a" },
