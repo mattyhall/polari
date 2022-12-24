@@ -1,0 +1,6 @@
+#!/usr/bin/env fish
+
+set tmpfile (mktemp)
+
+read -z | dot -Tpng > $tmpfile
+img2sixel $tmpfile

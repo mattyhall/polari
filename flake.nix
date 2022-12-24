@@ -85,6 +85,7 @@
               gdb
               asciidoctor
               graphviz
+              libsixel
             ]);
           };
         }

@@ -47,7 +47,7 @@ fn DotWriter(comptime W: anytype) type {
             switch (expression.*) {
                 .integer => |i| {
                     try self.w.print(
-                        \\  e_{} [label="{}"]
+                        \\  e_{} [label="{}",color="white",fontcolor="white"]
                         \\
                     , .{ e_id, i });
                 },
@@ -62,9 +62,9 @@ fn DotWriter(comptime W: anytype) type {
                     };
 
                     try self.w.print(
-                        \\  e_{[e_id]} [label="{[op]s}"]
-                        \\  e_{[e_id]} -- e_{[lhs_id]}
-                        \\  e_{[e_id]} -- e_{[rhs_id]}
+                        \\  e_{[e_id]} [label="{[op]s}",color="white",fontcolor="white"]
+                        \\  e_{[e_id]} -- e_{[lhs_id]} [color="white"]
+                        \\  e_{[e_id]} -- e_{[rhs_id]} [color="white"]
                         \\
                     , .{ .e_id = e_id, .lhs_id = lhs_id, .rhs_id = rhs_id, .op = op });
                 },
@@ -76,6 +76,8 @@ fn DotWriter(comptime W: anytype) type {
         fn write(self: *Self, program: *const parser.Program) !void {
             try self.w.writeAll(
                 \\strict graph {
+                \\  bgcolor="transparent"
+                \\  root [color="white",fontcolor="white"]
                 \\
             );
 
@@ -86,17 +88,17 @@ fn DotWriter(comptime W: anytype) type {
                         const s_id = self.id();
                         const i_id = self.id();
                         try self.w.print(
-                            \\  i_{[i_id]} [label="{[name]s}"]
-                            \\  s_{[s_id]} [label="="]
-                            \\  s_{[s_id]} -- i_{[i_id]}
-                            \\  s_{[s_id]} -- {[e_id]}
-                            \\  root -- s_{[s_id]}
+                            \\  i_{[i_id]} [label="{[name]s}",color="white",fontcolor="white"]
+                            \\  s_{[s_id]} [label="=",color="white",fontcolor="white"]
+                            \\  s_{[s_id]} -- i_{[i_id]} [color="white"]
+                            \\  s_{[s_id]} -- {[e_id]} [color="white"]
+                            \\  root -- s_{[s_id]} [color="white"]
                         , .{ .i_id = i_id, .s_id = s_id, .e_id = e_id, .name = a.identifier });
                     },
                     .expression => |e| {
                         const e_id = try self.writeExpression(e);
                         try self.w.print(
-                            \\  root -- e_{}
+                            \\  root -- e_{} [color="white"]
                             \\
                         , .{e_id});
                     },
