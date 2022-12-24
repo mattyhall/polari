@@ -2,6 +2,7 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 
 const TokLoc = lexer.TokLoc;
+const Diag = lexer.Diag;
 
 pub const Expression = union(enum) {
     integer: i64,
@@ -86,13 +87,15 @@ fn bindingPower(op: Operation) struct { lhs: u8, rhs: u8 } {
 pub const Parser = struct {
     lexer: Lexer,
     program: Program,
+    gpa: std.mem.Allocator,
 
     peeked: ?TokLoc = null,
+    diag: ?Diag = null,
 
     const Error = error{ EndOfFile, UnexpectedChar, UnexpectedToken, OutOfMemory };
 
     fn init(gpa: std.mem.Allocator, l: Lexer) Parser {
-        return .{ .lexer = l, .program = Program.init(gpa) };
+        return .{ .gpa = gpa, .lexer = l, .program = Program.init(gpa) };
     }
 
     fn peek(self: *Parser) Error!TokLoc {
@@ -112,10 +115,33 @@ pub const Parser = struct {
         return tokloc;
     }
 
+    fn allocDiag(self: *Parser, loc: lexer.Loc, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+        const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
+        self.diag = Diag{ .msg = msg, .allocator = self.gpa, .loc = loc };
+    }
+
+    /// expect ensures the next token is tok.
+    fn expect(self: *Parser, comptime tok: lexer.Tok) Error!void {
+        switch (tok) {
+            .identifier, .integer => @compileError("expect must be used with a token without a payload"),
+            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon => {},
+        }
+
+        const tokloc = try self.pop();
+        if (std.meta.activeTag(tokloc.tok) == std.meta.activeTag(tok)) return;
+
+        try self.allocDiag(tokloc.loc, "unexpected token: expected {}, got {}", .{ tok, tokloc.tok });
+        return error.UnexpectedToken;
+    }
+
     fn parseExpression(self: *Parser, min_bp: u8) Error!*Expression {
-        var lhs = switch ((try self.pop()).tok) {
+        const lhs_tokloc = try self.pop();
+        var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| try self.program.create(Expression{ .integer = n }),
-            else => return error.UnexpectedToken,
+            else => |tok| {
+                try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected integer, got {}", .{tok});
+                return error.UnexpectedToken;
+            },
         };
 
         while (true) {
@@ -130,7 +156,16 @@ pub const Parser = struct {
                 .asterisk => Operation.multiply,
                 .forward_slash => Operation.divide,
 
-                else => return error.UnexpectedToken,
+                .semicolon => return lhs,
+
+                else => {
+                    try self.allocDiag(
+                        tokloc.loc,
+                        "unexpected token: expected operator or semicolon, got {}",
+                        .{tokloc.tok},
+                    );
+                    return error.UnexpectedToken;
+                },
             };
 
             const power = bindingPower(op);
@@ -147,13 +182,24 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) Error!Program {
         const tokloc = try self.peek();
         const expr = switch (tokloc.tok) {
-            .integer => try self.parseExpression(0),
-            else => return error.UnexpectedToken,
+            .integer => b: {
+                var e = try self.parseExpression(0);
+                try self.expect(.semicolon);
+                break :b e;
+            },
+            else => {
+                try self.allocDiag(tokloc.loc, "unexpected token: expected integer, got: {}", .{tokloc.tok});
+                return error.UnexpectedToken;
+            },
         };
 
         try self.program.stmts.append(self.program.arena.allocator(), .{ .expression = expr });
 
         return self.program;
+    }
+
+    pub fn deinit(self: *Parser) void {
+        if (self.diag) |*d| d.deinit();
     }
 };
 
@@ -162,6 +208,7 @@ const testing = std.testing;
 fn expectEqualParse(toks: []const lexer.Tok, expected: Expression) !void {
     var l = Lexer{ .fake = lexer.Fake{ .toks = toks } };
     var parser = Parser.init(testing.allocator, l);
+    defer parser.deinit();
 
     var actual = try parser.parse();
     defer actual.deinit();
@@ -179,14 +226,14 @@ const Tests = struct {
     }
 
     test "maths" {
-        try expectEqualParse(&.{.{ .integer = 1 }}, .{ .integer = 1 });
+        try expectEqualParse(&.{ .{ .integer = 1 }, .semicolon }, .{ .integer = 1 });
 
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         var a = arena.allocator();
 
         try expectEqualParse(
-            &.{ .{ .integer = 1 }, .plus, .{ .integer = 2 }, .asterisk, .{ .integer = 3 } },
+            &.{ .{ .integer = 1 }, .plus, .{ .integer = 2 }, .asterisk, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .plus,
                 .lhs = try e(a, .{ .integer = 1 }),
@@ -201,7 +248,7 @@ const Tests = struct {
         );
 
         try expectEqualParse(
-            &.{ .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .minus, .{ .integer = 3 } },
+            &.{ .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .minus, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .minus,
                 .lhs = try e(a, .{

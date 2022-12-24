@@ -35,7 +35,16 @@ pub const Loc = struct { line: u32 = 1, col: u32 = 1 };
 pub const TokLoc = struct { tok: Tok, loc: Loc };
 
 /// Diag will be filled in with diagnostic information if an error happens whilst lexing.
-pub const Diag = struct { loc: Loc, msg: []const u8 };
+pub const Diag = struct {
+    loc: Loc,
+    msg: []const u8,
+    allocator: ?std.mem.Allocator = null,
+
+    pub fn deinit(self: *Diag) void {
+        var a = self.allocator orelse return;
+        a.free(self.msg);
+    }
+};
 
 pub const Lexer = struct {
     source: []const u8,
