@@ -1,0 +1,3 @@
+[submodule "third_party/simargs"]
+	path = third_party/simargs
+	url = git@github.com:jiacai2050/simargs.git

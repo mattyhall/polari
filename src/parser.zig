@@ -52,7 +52,7 @@ pub const Program = struct {
     }
 };
 
-const Lexer = union(enum) {
+pub const Lexer = union(enum) {
     real: lexer.Lexer,
     fake: lexer.Fake,
 
@@ -60,6 +60,13 @@ const Lexer = union(enum) {
         return switch (self.*) {
             .real => |*r| r.next(),
             .fake => |*f| f.next(),
+        };
+    }
+
+    pub fn getDiag(self: *const Lexer) ?Diag {
+        return switch (self.*) {
+            .real => |*r| r.diag,
+            .fake => null,
         };
     }
 
@@ -94,7 +101,7 @@ pub const Parser = struct {
 
     const Error = error{ EndOfFile, UnexpectedChar, UnexpectedToken, OutOfMemory };
 
-    fn init(gpa: std.mem.Allocator, l: Lexer) Parser {
+    pub fn init(gpa: std.mem.Allocator, l: Lexer) Parser {
         return .{ .gpa = gpa, .lexer = l, .program = Program.init(gpa) };
     }
 
@@ -196,6 +203,11 @@ pub const Parser = struct {
         try self.program.stmts.append(self.program.arena.allocator(), .{ .expression = expr });
 
         return self.program;
+    }
+
+    pub fn getDiag(self: *const Parser) ?Diag {
+        if (self.diag) |d| return d;
+        return self.lexer.getDiag();
     }
 
     pub fn deinit(self: *Parser) void {
