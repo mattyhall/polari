@@ -68,6 +68,18 @@ fn DotWriter(comptime W: anytype) type {
                         \\
                     , .{ .e_id = e_id, .lhs_id = lhs_id, .rhs_id = rhs_id, .op = op });
                 },
+                .unaryop => |unaryop| {
+                    const child_id = try self.writeExpression(unaryop.e);
+                    const op = switch (unaryop.op) {
+                        .negate => "-",
+                    };
+
+                    try self.w.print(
+                        \\  e_{[e_id]} [label="{[op]s}",color="white",fontcolor="white"]
+                        \\  e_{[e_id]} -- e_{[child_id]} [color="white"]
+                        \\
+                    , .{ .e_id = e_id, .child_id = child_id, .op = op });
+                },
             }
 
             return e_id;

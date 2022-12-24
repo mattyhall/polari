@@ -6,25 +6,33 @@ const Diag = lexer.Diag;
 
 pub const Expression = union(enum) {
     integer: i64,
-    binop: struct { op: Operation, lhs: *Expression, rhs: *Expression },
+    binop: struct { op: BinaryOperation, lhs: *Expression, rhs: *Expression },
+    unaryop: struct { op: UnaryOperation, e: *Expression },
 
     fn eql(lhs: *const Expression, rhs: *const Expression) bool {
         if (std.meta.activeTag(lhs.*) != std.meta.activeTag(rhs.*)) return false;
 
         switch (lhs.*) {
             .integer => |l| return l == rhs.integer,
-
             .binop => |binop| {
                 if (binop.op != rhs.binop.op) return false;
 
                 return binop.lhs.eql(rhs.binop.lhs) and binop.rhs.eql(rhs.binop.rhs);
             },
+            .unaryop => |unaryop| {
+                if (unaryop.op != rhs.unaryop.op) return false;
+
+                return unaryop.e.eql(rhs.unaryop.e);
+            },
         }
     }
 };
 
-/// Operation represents operators like '+', '-' etc.
-pub const Operation = enum { plus, minus, multiply, divide };
+/// BinaryOperation represents infix operators like '+', '-' etc.
+pub const BinaryOperation = enum { plus, minus, multiply, divide };
+
+/// UnaryOperation represents operators taking one argument, e.g. negation.
+pub const UnaryOperation = enum { negate };
 
 pub const Statement = union(enum) {
     assignment: struct { identifier: []const u8, expression: *Expression },
@@ -78,16 +86,23 @@ pub const Lexer = union(enum) {
     }
 };
 
-/// bindingPower returns the power of the lhs and rhs of op. This is used in our Pratt parser for expressions. Higher
-/// binding power means greater precedence.
+/// infixBindingPower returns the power of the lhs and rhs of op. This is used in our Pratt parser for expressions.
+/// Higher binding power means greater precedence.
 ///
 /// NOTE: rhs must not be the same as lhs. rhs > lhs gives left associativity, lhs < rhs gives right associativity.
-fn bindingPower(op: Operation) struct { lhs: u8, rhs: u8 } {
+fn infixBindingPower(op: BinaryOperation) struct { lhs: u8, rhs: u8 } {
     return switch (op) {
         .minus => .{ .lhs = 10, .rhs = 11 },
         .plus => .{ .lhs = 30, .rhs = 31 },
         .multiply => .{ .lhs = 50, .rhs = 51 },
         .divide => .{ .lhs = 70, .rhs = 71 },
+    };
+}
+
+/// prefixBindingPower returns the power of the prefix operator op.
+fn prefixBindingPower(op: UnaryOperation) u8 {
+    return switch (op) {
+        .negate => 91,
     };
 }
 
@@ -145,6 +160,11 @@ pub const Parser = struct {
         const lhs_tokloc = try self.pop();
         var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| try self.program.create(Expression{ .integer = n }),
+            .minus => b: {
+                const bp = prefixBindingPower(.negate);
+                const e = try self.parseExpression(bp);
+                break :b try self.program.create(Expression{ .unaryop = .{ .op = .negate, .e = e } });
+            },
             else => |tok| {
                 try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected integer, got {}", .{tok});
                 return error.UnexpectedToken;
@@ -158,10 +178,10 @@ pub const Parser = struct {
             };
 
             const op = switch (tokloc.tok) {
-                .plus => Operation.plus,
-                .minus => Operation.minus,
-                .asterisk => Operation.multiply,
-                .forward_slash => Operation.divide,
+                .plus => BinaryOperation.plus,
+                .minus => BinaryOperation.minus,
+                .asterisk => BinaryOperation.multiply,
+                .forward_slash => BinaryOperation.divide,
 
                 .semicolon => return lhs,
 
@@ -175,7 +195,7 @@ pub const Parser = struct {
                 },
             };
 
-            const power = bindingPower(op);
+            const power = infixBindingPower(op);
             if (power.lhs < min_bp) return lhs;
 
             _ = self.pop() catch unreachable;
@@ -187,19 +207,9 @@ pub const Parser = struct {
     }
 
     pub fn parse(self: *Parser) Error!Program {
-        const tokloc = try self.peek();
-        const expr = switch (tokloc.tok) {
-            .integer => b: {
-                var e = try self.parseExpression(0);
-                try self.expect(.semicolon);
-                break :b e;
-            },
-            else => {
-                try self.allocDiag(tokloc.loc, "unexpected token: expected integer, got: {}", .{tokloc.tok});
-                return error.UnexpectedToken;
-            },
-        };
+        errdefer self.program.deinit();
 
+        const expr = try self.parseExpression(0);
         try self.program.stmts.append(self.program.arena.allocator(), .{ .expression = expr });
 
         return self.program;
@@ -271,6 +281,35 @@ const Tests = struct {
                     },
                 }),
                 .rhs = try e(a, .{ .integer = 3 }),
+            } },
+        );
+
+        try expectEqualParse(
+            &.{ .{ .integer = 1 }, .asterisk, .minus, .{ .integer = 2 }, .forward_slash, .{ .integer = 3 }, .semicolon },
+            .{ .binop = .{
+                .op = .multiply,
+                .lhs = try e(a, .{ .integer = 1 }),
+                .rhs = try e(a, .{
+                    .binop = .{
+                        .op = .divide,
+                        .lhs = try e(a, .{ .unaryop = .{ .op = .negate, .e = try e(a, .{ .integer = 2 }) } }),
+                        .rhs = try e(a, .{ .integer = 3 }),
+                    },
+                }),
+            } },
+        );
+
+        try expectEqualParse(
+            &.{ .minus, .minus, .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .semicolon },
+            .{ .binop = .{
+                .op = .multiply,
+                .lhs = try e(a, .{
+                    .unaryop = .{
+                        .op = .negate,
+                        .e = try e(a, .{ .unaryop = .{ .op = .negate, .e = try e(a, .{ .integer = 1 }) } }),
+                    },
+                }),
+                .rhs = try e(a, .{ .integer = 2 }),
             } },
         );
     }
