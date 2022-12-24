@@ -96,7 +96,7 @@ pub const Lexer = struct {
             const c = self.peek() catch return;
 
             switch (c) {
-                '\r', '\t', ' ' => _ = self.pop() catch unreachable,
+                '\r', '\n', '\t', ' ' => _ = self.pop() catch unreachable,
                 else => return,
             }
         }

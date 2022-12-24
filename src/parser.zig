@@ -269,8 +269,17 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) Error!Program {
         errdefer self.program.deinit();
 
-        const stmt = try self.parseStatement();
-        try self.program.stmts.append(self.program.arena.allocator(), stmt);
+        while (true) {
+            _ = self.peek() catch |e| switch (e) {
+                error.EndOfFile => return self.program,
+                else => {
+                    return e;
+                },
+            };
+
+            const stmt = try self.parseStatement();
+            try self.program.stmts.append(self.program.arena.allocator(), stmt);
+        }
 
         return self.program;
     }
@@ -289,23 +298,30 @@ pub const Parser = struct {
 
 const testing = std.testing;
 
-fn expectEqualParse(toks: []const lexer.Tok, expected: Statement) !void {
+fn expectEqualParses(toks: []const lexer.Tok, expecteds: []const Statement) !void {
     var l = Lexer{ .fake = lexer.Fake{ .toks = toks } };
     var parser = Parser.init(testing.allocator, l);
     defer parser.deinit();
 
-    var actual = try parser.parse();
-    defer actual.deinit();
+    var actuals = try parser.parse();
+    defer actuals.deinit();
 
-    try testing.expectEqual(@intCast(usize, 1), actual.stmts.items.len);
+    try testing.expectEqual(expecteds.len, actuals.stmts.items.len);
 
-    try testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual.stmts.items[0]));
+    for (actuals.stmts.items) |actual, i| {
+        var expected = expecteds[i];
+        try testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
 
-    switch (actual.stmts.items[0]) {
-        .assignment => |a| if (!std.mem.eql(u8, a.identifier, expected.assignment.identifier) or
-            !a.expression.eql(expected.assignment.expression)) return error.TestExpectedEqual,
-        .expression => |e| if (!e.eql(expected.expression)) return,
+        switch (actual) {
+            .assignment => |a| if (!std.mem.eql(u8, a.identifier, expected.assignment.identifier) or
+                !a.expression.eql(expected.assignment.expression)) return error.TestExpectedEqual,
+            .expression => |e| if (!e.eql(expected.expression)) return,
+        }
     }
+}
+
+fn expectEqualParse(toks: []const lexer.Tok, expected: Statement) !void {
+    return expectEqualParses(toks, &.{expected});
 }
 
 fn expectEqualParseExpr(toks: []const lexer.Tok, expected: Expression) !void {
@@ -474,8 +490,19 @@ const Tests = struct {
             .semicolon,
         });
     }
+
+    test "statements" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParses(
+            &.{ .{ .integer = 1 }, .semicolon, .{ .integer = 2 }, .semicolon },
+            &.{ .{ .expression = try e(a, .{ .integer = 1 }) }, .{ .expression = try e(a, .{ .integer = 2 }) } },
+        );
+    }
 };
 
-test "foo" {
+test "all" {
     testing.refAllDecls(Tests);
 }
