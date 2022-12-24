@@ -97,16 +97,21 @@ fn DotWriter(comptime W: anytype) type {
             for (program.stmts.items) |stmt| {
                 switch (stmt) {
                     .assignment => |a| {
-                        const e_id = try self.writeExpression(a.expression);
                         const s_id = self.id();
                         const i_id = self.id();
+
                         try self.w.print(
                             \\  i_{[i_id]} [label="{[name]s}",color="white",fontcolor="white"]
+                            \\
+                        , .{ .i_id = i_id, .name = a.identifier });
+
+                        const e_id = try self.writeExpression(a.expression);
+                        try self.w.print(
                             \\  s_{[s_id]} [label="=",color="white",fontcolor="white"]
                             \\  s_{[s_id]} -- i_{[i_id]} [color="white"]
-                            \\  s_{[s_id]} -- {[e_id]} [color="white"]
+                            \\  s_{[s_id]} -- e_{[e_id]} [color="white"]
                             \\  root -- s_{[s_id]} [color="white"]
-                        , .{ .i_id = i_id, .s_id = s_id, .e_id = e_id, .name = a.identifier });
+                        , .{ .i_id = i_id, .s_id = s_id, .e_id = e_id });
                     },
                     .expression => |e| {
                         const e_id = try self.writeExpression(e);

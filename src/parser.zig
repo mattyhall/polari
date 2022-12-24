@@ -157,8 +157,45 @@ pub const Parser = struct {
         return error.UnexpectedToken;
     }
 
+    fn parseStatement(self: *Parser) Error!Statement {
+        const lhs_tokloc = try self.pop();
+
+        if (lhs_tokloc.tok != .identifier) {
+            var expr = try self.parseExpressionLhs(0, lhs_tokloc);
+            try self.expect(.semicolon);
+            return Statement{ .expression = expr };
+        }
+
+        const op_tokloc = try self.peek();
+        return switch (op_tokloc.tok) {
+            .equals => try self.parseAssignment(lhs_tokloc),
+            else => b: {
+                var expr = try self.parseExpressionLhs(0, lhs_tokloc);
+                try self.expect(.semicolon);
+                break :b Statement{ .expression = expr };
+            },
+        };
+    }
+
+    fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Statement {
+        try self.expect(.equals);
+
+        if (lhs.tok != .identifier) {
+            try self.allocDiag(lhs.loc, "unexpected token: cannot assign to a {}", .{lhs.tok});
+            return error.UnexpectedToken;
+        }
+
+        var rhs = try self.parseExpression(0);
+
+        return Statement{ .assignment = .{ .identifier = lhs.tok.identifier, .expression = rhs } };
+    }
+
     fn parseExpression(self: *Parser, min_bp: u8) Error!*Expression {
         const lhs_tokloc = try self.pop();
+        return try self.parseExpressionLhs(min_bp, lhs_tokloc);
+    }
+
+    fn parseExpressionLhs(self: *Parser, min_bp: u8, lhs_tokloc: TokLoc) Error!*Expression {
         var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| try self.program.create(Expression{ .integer = n }),
             .minus, .left_paren => b: {
@@ -218,9 +255,8 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) Error!Program {
         errdefer self.program.deinit();
 
-        const expr = try self.parseExpression(0);
-        try self.expect(.semicolon);
-        try self.program.stmts.append(self.program.arena.allocator(), .{ .expression = expr });
+        const stmt = try self.parseStatement();
+        try self.program.stmts.append(self.program.arena.allocator(), stmt);
 
         return self.program;
     }
@@ -237,7 +273,26 @@ pub const Parser = struct {
 
 const testing = std.testing;
 
-fn expectEqualParse(toks: []const lexer.Tok, expected: Expression) !void {
+fn expectEqualParse(toks: []const lexer.Tok, expected: Statement) !void {
+    var l = Lexer{ .fake = lexer.Fake{ .toks = toks } };
+    var parser = Parser.init(testing.allocator, l);
+    defer parser.deinit();
+
+    var actual = try parser.parse();
+    defer actual.deinit();
+
+    try testing.expectEqual(@intCast(usize, 1), actual.stmts.items.len);
+
+    try testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual.stmts.items[0]));
+
+    switch (actual.stmts.items[0]) {
+        .assignment => |a| if (!std.mem.eql(u8, a.identifier, expected.assignment.identifier) or
+            !a.expression.eql(expected.assignment.expression)) return error.TestExpectedEqual,
+        .expression => |e| if (!e.eql(expected.expression)) return,
+    }
+}
+
+fn expectEqualParseExpr(toks: []const lexer.Tok, expected: Expression) !void {
     var l = Lexer{ .fake = lexer.Fake{ .toks = toks } };
     var parser = Parser.init(testing.allocator, l);
     defer parser.deinit();
@@ -266,13 +321,13 @@ const Tests = struct {
     }
 
     test "maths" {
-        try expectEqualParse(&.{ .{ .integer = 1 }, .semicolon }, .{ .integer = 1 });
+        try expectEqualParseExpr(&.{ .{ .integer = 1 }, .semicolon }, .{ .integer = 1 });
 
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         var a = arena.allocator();
 
-        try expectEqualParse(
+        try expectEqualParseExpr(
             &.{ .{ .integer = 1 }, .plus, .{ .integer = 2 }, .asterisk, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .plus,
@@ -287,7 +342,7 @@ const Tests = struct {
             } },
         );
 
-        try expectEqualParse(
+        try expectEqualParseExpr(
             &.{ .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .minus, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .minus,
@@ -302,7 +357,7 @@ const Tests = struct {
             } },
         );
 
-        try expectEqualParse(
+        try expectEqualParseExpr(
             &.{ .{ .integer = 1 }, .asterisk, .minus, .{ .integer = 2 }, .forward_slash, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .multiply,
@@ -317,7 +372,7 @@ const Tests = struct {
             } },
         );
 
-        try expectEqualParse(
+        try expectEqualParseExpr(
             &.{ .minus, .minus, .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .semicolon },
             .{ .binop = .{
                 .op = .multiply,
@@ -331,7 +386,7 @@ const Tests = struct {
             } },
         );
 
-        try expectEqualParse(
+        try expectEqualParseExpr(
             &.{ .left_paren, .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .right_paren, .forward_slash, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .divide,
@@ -356,6 +411,51 @@ const Tests = struct {
         try expectFailParse(error.EndOfFile, &.{.{ .integer = 1 }});
         try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .plus, .plus });
         try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .plus, .{ .integer = 3 }, .equals });
+    }
+
+    test "assignments" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParse(
+            &.{ .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .semicolon },
+            Statement{ .assignment = .{ .identifier = "a", .expression = try e(a, .{ .integer = 1 }) } },
+        );
+
+        try expectEqualParse(&.{
+            .{ .identifier = "a" },
+            .equals,
+            .{ .integer = 1 },
+            .plus,
+            .{ .integer = 2 },
+            .asterisk,
+            .{ .integer = 3 },
+            .semicolon,
+        }, Statement{ .assignment = .{ .identifier = "a", .expression = try e(a, .{ .binop = .{
+            .op = .plus,
+            .lhs = try e(a, .{ .integer = 1 }),
+            .rhs = try e(a, .{
+                .binop = .{
+                    .op = .multiply,
+                    .lhs = try e(a, .{ .integer = 2 }),
+                    .rhs = try e(a, .{ .integer = 3 }),
+                },
+            }),
+        } }) } });
+    }
+
+    test "fail: assignments" {
+        try expectFailParse(error.UnexpectedToken, &.{.equals});
+        try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .equals, .{ .integer = 3 }, .semicolon });
+        try expectFailParse(error.UnexpectedToken, &.{
+            .{ .identifier = "a" },
+            .equals,
+            .{ .integer = 3 },
+            .equals,
+            .{ .integer = 4 },
+            .semicolon,
+        });
     }
 };
 
