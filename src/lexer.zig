@@ -1,5 +1,19 @@
 const std = @import("std");
 
+pub const Fake = struct {
+    toks: []const Tok,
+    index: u32 = 0,
+
+    pub fn next(self: *Fake) ?TokLoc {
+        if (self.index > self.toks.len - 1) return null;
+
+        const tok = self.toks[self.index];
+        self.index += 1;
+
+        return .{ .tok = tok, .loc = .{} };
+    }
+};
+
 /// Tok lists all the tokens that can be lexed.
 pub const Tok = union(enum) {
     identifier: []const u8,
@@ -145,6 +159,7 @@ pub const Lexer = struct {
             '-' => self.tokloc(.minus),
             '/' => self.tokloc(.forward_slash),
             '*' => self.tokloc(.asterisk),
+            ';' => self.tokloc(.semicolon),
             else => {
                 if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return try self.parseIdentifier();
 
