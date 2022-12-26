@@ -2,12 +2,14 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 const parser = @import("parser.zig");
 const utils = @import("utils.zig");
+const sema = @import("sema.zig");
 const simargs = @import("simargs");
 
 pub const log_level: std.log.Level = .info;
 
 pub const Opts = struct {
     @"dump-ast": bool = false,
+    @"dump-rules": bool = false,
 };
 
 fn readStdin(gpa: std.mem.Allocator) ![]const u8 {
@@ -174,6 +176,16 @@ pub fn main() !void {
     if (opts.args.@"dump-ast") {
         var w = std.io.getStdOut().writer();
         try (DotWriter(@TypeOf(w)){ .w = w }).write(&program);
+    }
+
+    var s = sema.Sema.init(gpa.allocator(), &program);
+    defer s.deinit();
+
+    try s.generateRules();
+
+    if (opts.args.@"dump-rules") {
+        var w = std.io.getStdOut().writer();
+        try s.printRules(w);
     }
 }
 

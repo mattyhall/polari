@@ -31,6 +31,36 @@ pub const Expression = union(enum) {
             },
         }
     }
+
+    pub fn write(self: *const Expression, writer: anytype) !void {
+        switch (self.*) {
+            .integer => |i| try writer.print("{}", .{i}),
+            .boolean => |b| try writer.print("{}", .{b}),
+            .identifier => |n| try writer.print("{s}", .{n}),
+            .binop => |binop| {
+                const op = switch (binop.op) {
+                    .plus => "+",
+                    .minus => "-",
+                    .multiply => "*",
+                    .divide => "/",
+                };
+                try writer.print("({s} ", .{op});
+                try binop.lhs.inner.write(writer);
+                try writer.print(" ", .{});
+                try binop.rhs.inner.write(writer);
+                try writer.print(")", .{});
+            },
+            .unaryop => |unaryop| {
+                switch (unaryop.op) {
+                    .negate => try writer.print("(- ", .{}),
+                    .grouping => try writer.print("(", .{}),
+                }
+
+                try unaryop.e.inner.write(writer);
+                try writer.print(")", .{});
+            },
+        }
+    }
 };
 
 /// BinaryOperation represents infix operators like '+', '-' etc.
