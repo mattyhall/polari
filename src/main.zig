@@ -51,6 +51,12 @@ fn DotWriter(comptime W: anytype) type {
                         \\
                     , .{ e_id, i });
                 },
+                .boolean => |b| {
+                    try self.w.print(
+                        \\  e_{} [label="{}",color="white",fontcolor="white"]
+                        \\
+                    , .{ e_id, b });
+                },
                 .identifier => |i| {
                     try self.w.print(
                         \\  e_{} [label="{s}",color="white",fontcolor="white"]

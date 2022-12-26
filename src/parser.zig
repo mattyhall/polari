@@ -7,6 +7,7 @@ const Diag = lexer.Diag;
 
 pub const Expression = union(enum) {
     integer: i64,
+    boolean: bool,
     identifier: []const u8,
     binop: struct { op: BinaryOperation, lhs: Located(*Expression), rhs: Located(*Expression) },
     unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
@@ -16,6 +17,7 @@ pub const Expression = union(enum) {
 
         switch (lhs.*) {
             .integer => |l| return l == rhs.integer,
+            .boolean => |b| return b == rhs.boolean,
             .identifier => |i| return std.mem.eql(u8, i, rhs.identifier),
             .binop => |binop| {
                 if (binop.op != rhs.binop.op) return false;
@@ -165,6 +167,7 @@ pub const Parser = struct {
         switch (tok) {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
+            .true, .false => {},
         }
 
         const tokloc = try self.pop();
@@ -229,6 +232,8 @@ pub const Parser = struct {
         const l = lhs_tokloc.loc;
         var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| locate(l, try self.program.create(Expression{ .integer = n })),
+            .true => locate(l, try self.program.create(Expression{ .boolean = true })),
+            .false => locate(l, try self.program.create(Expression{ .boolean = false })),
             .identifier => |n| locate(l, try self.program.create(Expression{ .identifier = n })),
             .minus, .left_paren => b: {
                 const op: UnaryOperation = switch (lhs_tokloc.tok) {
@@ -412,6 +417,11 @@ const Tests = struct {
     }
 
     const loc = Loc{};
+
+    test "boolean" {
+        try expectEqualParseExpr(&.{ .true, .semicolon }, .{ .boolean = true });
+        try expectEqualParseExpr(&.{ .false, .semicolon }, .{ .boolean = false });
+    }
 
     test "maths" {
         try expectEqualParseExpr(&.{ .{ .integer = 1 }, .semicolon }, .{ .integer = 1 });

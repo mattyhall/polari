@@ -18,6 +18,8 @@ pub const Fake = struct {
 pub const Tok = union(enum) {
     identifier: []const u8,
     integer: i64,
+    true,
+    false,
 
     equals,
     plus,
@@ -158,6 +160,26 @@ pub const Lexer = struct {
         return TokLoc{ .tok = .{ .integer = num }, .loc = start_loc };
     }
 
+    /// parseKeyword parses the given keyword.
+    fn parseKeyword(self: *Lexer, expected: []const u8, tok: Tok) !TokLoc {
+        const loc = self.loc;
+        const left = self.source.len - self.index;
+        if (left < expected.len) return try self.parseIdentifier();
+
+        if (!std.mem.eql(u8, expected, self.source[self.index .. self.index + expected.len]))
+            return try self.parseIdentifier();
+
+        if (left >= expected.len + 1) {
+            const c = self.source[self.index + expected.len];
+            if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-')
+                return try self.parseIdentifier();
+        }
+
+        self.peeked = null;
+        self.index = self.index + @intCast(u32, expected.len);
+        return TokLoc{ .loc = loc, .tok = tok };
+    }
+
     /// next returns the next token or null if we have reached the end of the file.
     pub fn next(self: *Lexer) Error!?TokLoc {
         self.skipWhitespace();
@@ -173,6 +195,8 @@ pub const Lexer = struct {
             ';' => self.tokloc(.semicolon),
             '(' => self.tokloc(.left_paren),
             ')' => self.tokloc(.right_paren),
+            't' => try self.parseKeyword("true", .true),
+            'f' => try self.parseKeyword("false", .false),
             else => {
                 if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return try self.parseIdentifier();
 
@@ -251,6 +275,7 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
+            .true, .false => continue,
         }
 
         std.debug.print("at index {}: expected {}, got {}\n", .{ i, item_expected, item_actual });
@@ -297,4 +322,14 @@ test "fail: random chars" {
     try testing.expectError(error.UnexpectedChar, sourceToTokLocs(testing.allocator, "~"));
     try testing.expectError(error.UnexpectedChar, sourceToTokLocs(testing.allocator, "^"));
     try testing.expectError(error.UnexpectedChar, sourceToTokLocs(testing.allocator, "#"));
+}
+
+test "keywords" {
+    try expectLex(testing.allocator, "true", &.{.true});
+    try expectLex(testing.allocator, "false", &.{.false});
+    try expectLex(testing.allocator, "truf", &.{.{ .identifier = "truf" }});
+    try expectLex(testing.allocator, "truef", &.{.{ .identifier = "truef" }});
+    try expectLex(testing.allocator, "true f", &.{ .true, .{ .identifier = "f" } });
+    try expectLex(testing.allocator, "true+f", &.{ .true, .plus, .{ .identifier = "f" } });
+    try expectLex(testing.allocator, "true-f", &.{.{ .identifier = "true-f" }});
 }
