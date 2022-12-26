@@ -44,7 +44,13 @@ fn locToIndexes(source: []const u8, loc: lexer.Loc) error{EndOfFile}!LocIndexes 
     return LocIndexes{ .loc = loc_index, .line_start = line_start, .line_end = index };
 }
 
-pub fn printError(source: []const u8, diag: lexer.Diag) !void {
+pub fn printErrors(source: []const u8, diags: []const lexer.Diag) !void {
+    for (diags) |diag| {
+        try printError(source, diag);
+    }
+}
+
+fn printError(source: []const u8, diag: lexer.Diag) !void {
     const indexes = try locToIndexes(source, diag.loc);
 
     std.debug.print("error {}:{}\n", .{ diag.loc.line, diag.loc.col });

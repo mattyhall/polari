@@ -85,9 +85,9 @@ pub const Lexer = union(enum) {
         };
     }
 
-    pub fn getDiag(self: *const Lexer) ?Diag {
+    pub fn getDiag(self: *const Lexer) ?*const Diag {
         return switch (self.*) {
-            .real => |*r| r.diag,
+            .real => |*r| if (r.diag) |*d| d else null,
             .fake => null,
         };
     }
@@ -127,7 +127,8 @@ pub const Parser = struct {
     gpa: std.mem.Allocator,
 
     peeked: ?TokLoc = null,
-    diag: ?Diag = null,
+    diags: std.ArrayListUnmanaged(Diag) = .{},
+    err: ?Error = null,
 
     const Error = error{ EndOfFile, UnexpectedChar, UnexpectedToken, OutOfMemory };
 
@@ -154,7 +155,7 @@ pub const Parser = struct {
 
     fn allocDiag(self: *Parser, loc: lexer.Loc, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
         const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
-        self.diag = Diag{ .msg = msg, .allocator = self.gpa, .loc = loc };
+        try self.diags.append(self.gpa, Diag{ .msg = msg, .allocator = self.gpa, .loc = loc });
     }
 
     /// expect ensures the next token is tok.
@@ -280,34 +281,68 @@ pub const Parser = struct {
         }
     }
 
+    /// skipUntilAfterSemicolon keeps popping tokens until it reaches a semicolon. It then moves to the next token.
+    /// This is because we want to capture as many errors as possible.
+    fn skipUntilAfterSemicolon(self: *Parser) Error!void {
+        while (true) {
+            const tokloc = self.pop() catch |e| switch (e) {
+                error.EndOfFile => return,
+                else => return e,
+            };
+
+            if (tokloc.tok == .semicolon) {
+                return;
+            }
+        }
+    }
+
     /// parse takes tokens from the lexer and parses them into a program.
     pub fn parse(self: *Parser) Error!Program {
         errdefer self.program.deinit();
 
         while (true) {
             _ = self.peek() catch |e| switch (e) {
-                error.EndOfFile => return self.program,
-                else => {
-                    return e;
-                },
+                error.EndOfFile => break,
+                else => return e,
             };
 
-            const stmt = try self.parseStatement();
+            const stmt = self.parseStatement() catch |e| switch (e) {
+                error.EndOfFile, error.OutOfMemory => return e,
+                else => {
+                    self.err = e;
+                    try self.skipUntilAfterSemicolon();
+                    continue;
+                },
+            };
             try self.program.stmts.append(self.program.arena.allocator(), stmt);
         }
+
+        if (self.err) |e| return e;
 
         return self.program;
     }
 
-    /// getDiag returns the Diag of the parser or, if there isn't one, that of the lexer.
-    pub fn getDiag(self: *const Parser) ?Diag {
-        if (self.diag) |d| return d;
-        return self.lexer.getDiag();
+    /// getDiags returns the Diags of the parser or, if there isn't one, those of the lexer.
+    pub fn getDiags(self: *const Parser) []const Diag {
+        if (self.diags.items.len > 0) return self.diags.items;
+
+        if (self.lexer.getDiag()) |d| {
+            var a: []const Diag = undefined;
+            a.ptr = @ptrCast([*]const Diag, d);
+            a.len = 1;
+            return a;
+        }
+
+        return &[0]Diag{};
     }
 
     /// deinit deallocates parser.
     pub fn deinit(self: *Parser) void {
-        if (self.diag) |*d| d.deinit();
+        for (self.diags.items) |*diag| {
+            diag.deinit();
+        }
+
+        self.diags.deinit(self.gpa);
     }
 };
 

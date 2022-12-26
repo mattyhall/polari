@@ -148,11 +148,11 @@ pub fn main() !void {
 
     var program = p.parse() catch |e| {
         switch (e) {
-            error.EndOfFile => std.debug.print("end of file", .{}),
-            else => {
-                var diag = p.getDiag() orelse std.os.exit(1);
-                try utils.printError(source, diag);
+            error.EndOfFile => {
+                try utils.printErrors(source, p.getDiags());
+                std.debug.print("error: end of file\n", .{});
             },
+            else => try utils.printErrors(source, p.getDiags()),
         }
 
         std.os.exit(1);
