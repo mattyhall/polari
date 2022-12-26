@@ -51,6 +51,12 @@ fn DotWriter(comptime W: anytype) type {
                         \\
                     , .{ e_id, i });
                 },
+                .identifier => |i| {
+                    try self.w.print(
+                        \\  e_{} [label="{s}",color="white",fontcolor="white"]
+                        \\
+                    , .{ e_id, i });
+                },
                 .binop => |binop| {
                     const lhs_id = try self.writeExpression(binop.lhs.inner);
                     const rhs_id = try self.writeExpression(binop.rhs.inner);

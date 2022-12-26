@@ -7,6 +7,7 @@ const Diag = lexer.Diag;
 
 pub const Expression = union(enum) {
     integer: i64,
+    identifier: []const u8,
     binop: struct { op: BinaryOperation, lhs: Located(*Expression), rhs: Located(*Expression) },
     unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
 
@@ -15,6 +16,7 @@ pub const Expression = union(enum) {
 
         switch (lhs.*) {
             .integer => |l| return l == rhs.integer,
+            .identifier => |i| return std.mem.eql(u8, i, rhs.identifier),
             .binop => |binop| {
                 if (binop.op != rhs.binop.op) return false;
 
@@ -227,6 +229,7 @@ pub const Parser = struct {
         const l = lhs_tokloc.loc;
         var lhs = switch (lhs_tokloc.tok) {
             .integer => |n| locate(l, try self.program.create(Expression{ .integer = n })),
+            .identifier => |n| locate(l, try self.program.create(Expression{ .identifier = n })),
             .minus, .left_paren => b: {
                 const op: UnaryOperation = switch (lhs_tokloc.tok) {
                     .minus => .negate,
@@ -516,6 +519,11 @@ const Tests = struct {
         try expectEqualParse(
             &.{ .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .semicolon },
             Statement{ .assignment = .{ .identifier = "a", .expression = locate(loc, try e(a, .{ .integer = 1 })) } },
+        );
+
+        try expectEqualParse(
+            &.{ .{ .identifier = "a" }, .equals, .{ .identifier = "b" }, .semicolon },
+            Statement{ .assignment = .{ .identifier = "a", .expression = locate(loc, try e(a, .{ .identifier = "b" })) } },
         );
 
         try expectEqualParse(&.{
