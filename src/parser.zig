@@ -2,12 +2,13 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 
 const TokLoc = lexer.TokLoc;
+const Loc = lexer.Loc;
 const Diag = lexer.Diag;
 
 pub const Expression = union(enum) {
     integer: i64,
-    binop: struct { op: BinaryOperation, lhs: *Expression, rhs: *Expression },
-    unaryop: struct { op: UnaryOperation, e: *Expression },
+    binop: struct { op: BinaryOperation, lhs: Located(*Expression), rhs: Located(*Expression) },
+    unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
 
     fn eql(lhs: *const Expression, rhs: *const Expression) bool {
         if (std.meta.activeTag(lhs.*) != std.meta.activeTag(rhs.*)) return false;
@@ -17,12 +18,12 @@ pub const Expression = union(enum) {
             .binop => |binop| {
                 if (binop.op != rhs.binop.op) return false;
 
-                return binop.lhs.eql(rhs.binop.lhs) and binop.rhs.eql(rhs.binop.rhs);
+                return binop.lhs.inner.eql(rhs.binop.lhs.inner) and binop.rhs.inner.eql(rhs.binop.rhs.inner);
             },
             .unaryop => |unaryop| {
                 if (unaryop.op != rhs.unaryop.op) return false;
 
-                return unaryop.e.eql(rhs.unaryop.e);
+                return unaryop.e.inner.eql(rhs.unaryop.e.inner);
             },
         }
     }
@@ -35,17 +36,30 @@ pub const BinaryOperation = enum { plus, minus, multiply, divide };
 pub const UnaryOperation = enum { negate, grouping };
 
 pub const Statement = union(enum) {
-    assignment: struct { identifier: []const u8, expression: *Expression },
+    assignment: struct { identifier: []const u8, expression: Located(*Expression) },
     expression: *Expression,
 };
+
+/// Locate wraps T in a struct with a Loc.
+fn Located(comptime T: anytype) type {
+    return struct {
+        loc: Loc,
+        inner: T,
+    };
+}
+
+/// locate puts v in its Located struct, with loc as the location.
+fn locate(loc: Loc, v: anytype) Located(@TypeOf(v)) {
+    return .{ .loc = loc, .inner = v };
+}
 
 /// Program represents the root of a polari AST. All nodes are arena allocated and freed in one go.
 pub const Program = struct {
     arena: std.heap.ArenaAllocator,
-    stmts: std.ArrayListUnmanaged(Statement),
+    stmts: std.ArrayListUnmanaged(Located(Statement)),
 
     fn init(gpa: std.mem.Allocator) Program {
-        return .{ .arena = std.heap.ArenaAllocator.init(gpa), .stmts = std.ArrayListUnmanaged(Statement){} };
+        return .{ .arena = std.heap.ArenaAllocator.init(gpa), .stmts = std.ArrayListUnmanaged(Located(Statement)){} };
     }
 
     /// create arena allocates an expression.
@@ -158,13 +172,13 @@ pub const Parser = struct {
     }
 
     /// parseStatement parses a single statement.
-    fn parseStatement(self: *Parser) Error!Statement {
+    fn parseStatement(self: *Parser) Error!Located(Statement) {
         const lhs_tokloc = try self.pop();
 
         if (lhs_tokloc.tok != .identifier) {
             var expr = try self.parseExpressionLhs(0, lhs_tokloc);
             try self.expect(.semicolon);
-            return Statement{ .expression = expr };
+            return locate(lhs_tokloc.loc, Statement{ .expression = expr.inner });
         }
 
         const op_tokloc = try self.peek();
@@ -177,7 +191,7 @@ pub const Parser = struct {
             else => b: {
                 var expr = try self.parseExpressionLhs(0, lhs_tokloc);
                 try self.expect(.semicolon);
-                break :b Statement{ .expression = expr };
+                break :b locate(lhs_tokloc.loc, Statement{ .expression = expr.inner });
             },
         };
     }
@@ -185,7 +199,7 @@ pub const Parser = struct {
     /// parseAssignments parses an assignment.
     ///
     /// NOTE: does not parse the trailing semicolon.
-    fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Statement {
+    fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Located(Statement) {
         try self.expect(.equals);
 
         if (lhs.tok != .identifier) {
@@ -195,22 +209,23 @@ pub const Parser = struct {
 
         var rhs = try self.parseExpression(0);
 
-        return Statement{ .assignment = .{ .identifier = lhs.tok.identifier, .expression = rhs } };
+        return locate(lhs.loc, Statement{ .assignment = .{ .identifier = lhs.tok.identifier, .expression = rhs } });
     }
 
     /// parseExpression parses a single expression.
     ///
     /// NOTE: does not parse the trailing semicolon.
-    fn parseExpression(self: *Parser, min_bp: u8) Error!*Expression {
+    fn parseExpression(self: *Parser, min_bp: u8) Error!Located(*Expression) {
         const lhs_tokloc = try self.pop();
         return try self.parseExpressionLhs(min_bp, lhs_tokloc);
     }
 
     /// parseExpressionLhs parses an expression but requires the caller to pass the first token (the lhs) of the
     /// expression. It uses Pratt parsing to handle precedence.
-    fn parseExpressionLhs(self: *Parser, min_bp: u8, lhs_tokloc: TokLoc) Error!*Expression {
+    fn parseExpressionLhs(self: *Parser, min_bp: u8, lhs_tokloc: TokLoc) Error!Located(*Expression) {
+        const l = lhs_tokloc.loc;
         var lhs = switch (lhs_tokloc.tok) {
-            .integer => |n| try self.program.create(Expression{ .integer = n }),
+            .integer => |n| locate(l, try self.program.create(Expression{ .integer = n })),
             .minus, .left_paren => b: {
                 const op: UnaryOperation = switch (lhs_tokloc.tok) {
                     .minus => .negate,
@@ -220,7 +235,7 @@ pub const Parser = struct {
                 const bp = prefixBindingPower(op);
                 const e = try self.parseExpression(bp);
                 if (op == .grouping) try self.expect(.right_paren);
-                break :b try self.program.create(Expression{ .unaryop = .{ .op = op, .e = e } });
+                break :b locate(l, try self.program.create(Expression{ .unaryop = .{ .op = op, .e = e } }));
             },
             else => |tok| {
                 try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected integer, got {}", .{tok});
@@ -261,7 +276,7 @@ pub const Parser = struct {
 
             const rhs = try self.parseExpression(power.rhs);
 
-            lhs = try self.program.create(Expression{ .binop = .{ .op = op, .lhs = lhs, .rhs = rhs } });
+            lhs = locate(l, try self.program.create(Expression{ .binop = .{ .op = op, .lhs = lhs, .rhs = rhs } }));
         }
     }
 
@@ -310,11 +325,11 @@ fn expectEqualParses(toks: []const lexer.Tok, expecteds: []const Statement) !voi
 
     for (actuals.stmts.items) |actual, i| {
         var expected = expecteds[i];
-        try testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
+        try testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual.inner));
 
-        switch (actual) {
+        switch (actual.inner) {
             .assignment => |a| if (!std.mem.eql(u8, a.identifier, expected.assignment.identifier) or
-                !a.expression.eql(expected.assignment.expression)) return error.TestExpectedEqual,
+                !a.expression.inner.eql(expected.assignment.expression.inner)) return error.TestExpectedEqual,
             .expression => |e| if (!e.eql(expected.expression)) return,
         }
     }
@@ -334,7 +349,7 @@ fn expectEqualParseExpr(toks: []const lexer.Tok, expected: Expression) !void {
 
     try testing.expectEqual(@intCast(usize, 1), actual.stmts.items.len);
 
-    if (!actual.stmts.items[0].expression.eql(&expected)) return error.TestExpectedEquals;
+    if (!actual.stmts.items[0].inner.expression.eql(&expected)) return error.TestExpectedEquals;
 }
 
 fn expectFailParse(expected: anyerror, toks: []const lexer.Tok) !void {
@@ -345,12 +360,20 @@ fn expectFailParse(expected: anyerror, toks: []const lexer.Tok) !void {
     try testing.expectError(expected, parser.parse());
 }
 
+test "Located" {
+    const T = Located(struct { foo: []const u8 });
+    var t = T{ .loc = .{}, .inner = .{ .foo = "foo" } };
+    try testing.expectEqualStrings("foo", t.inner.foo);
+}
+
 const Tests = struct {
     fn e(allocator: std.mem.Allocator, expression: Expression) !*Expression {
         var expr = try allocator.create(Expression);
         expr.* = expression;
         return expr;
     }
+
+    const loc = Loc{};
 
     test "maths" {
         try expectEqualParseExpr(&.{ .{ .integer = 1 }, .semicolon }, .{ .integer = 1 });
@@ -363,14 +386,14 @@ const Tests = struct {
             &.{ .{ .integer = 1 }, .plus, .{ .integer = 2 }, .asterisk, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .plus,
-                .lhs = try e(a, .{ .integer = 1 }),
-                .rhs = try e(a, .{
+                .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+                .rhs = locate(loc, try e(a, .{
                     .binop = .{
                         .op = .multiply,
-                        .lhs = try e(a, .{ .integer = 2 }),
-                        .rhs = try e(a, .{ .integer = 3 }),
+                        .lhs = locate(loc, try e(a, .{ .integer = 2 })),
+                        .rhs = locate(loc, try e(a, .{ .integer = 3 })),
                     },
-                }),
+                })),
             } },
         );
 
@@ -378,14 +401,14 @@ const Tests = struct {
             &.{ .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .minus, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .minus,
-                .lhs = try e(a, .{
+                .lhs = locate(loc, try e(a, .{
                     .binop = .{
                         .op = .multiply,
-                        .lhs = try e(a, .{ .integer = 1 }),
-                        .rhs = try e(a, .{ .integer = 2 }),
+                        .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+                        .rhs = locate(loc, try e(a, .{ .integer = 2 })),
                     },
-                }),
-                .rhs = try e(a, .{ .integer = 3 }),
+                })),
+                .rhs = locate(loc, try e(a, .{ .integer = 3 })),
             } },
         );
 
@@ -393,14 +416,17 @@ const Tests = struct {
             &.{ .{ .integer = 1 }, .asterisk, .minus, .{ .integer = 2 }, .forward_slash, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .multiply,
-                .lhs = try e(a, .{ .integer = 1 }),
-                .rhs = try e(a, .{
+                .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+                .rhs = locate(loc, try e(a, .{
                     .binop = .{
                         .op = .divide,
-                        .lhs = try e(a, .{ .unaryop = .{ .op = .negate, .e = try e(a, .{ .integer = 2 }) } }),
-                        .rhs = try e(a, .{ .integer = 3 }),
+                        .lhs = locate(
+                            loc,
+                            try e(a, .{ .unaryop = .{ .op = .negate, .e = locate(loc, try e(a, .{ .integer = 2 })) } }),
+                        ),
+                        .rhs = locate(loc, try e(a, .{ .integer = 3 })),
                     },
-                }),
+                })),
             } },
         );
 
@@ -408,13 +434,15 @@ const Tests = struct {
             &.{ .minus, .minus, .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .semicolon },
             .{ .binop = .{
                 .op = .multiply,
-                .lhs = try e(a, .{
+                .lhs = locate(loc, try e(a, .{
                     .unaryop = .{
                         .op = .negate,
-                        .e = try e(a, .{ .unaryop = .{ .op = .negate, .e = try e(a, .{ .integer = 1 }) } }),
+                        .e = locate(loc, try e(a, .{
+                            .unaryop = .{ .op = .negate, .e = locate(loc, try e(a, .{ .integer = 1 })) },
+                        })),
                     },
-                }),
-                .rhs = try e(a, .{ .integer = 2 }),
+                })),
+                .rhs = locate(loc, try e(a, .{ .integer = 2 })),
             } },
         );
 
@@ -422,19 +450,19 @@ const Tests = struct {
             &.{ .left_paren, .{ .integer = 1 }, .asterisk, .{ .integer = 2 }, .right_paren, .forward_slash, .{ .integer = 3 }, .semicolon },
             .{ .binop = .{
                 .op = .divide,
-                .lhs = try e(a, .{
+                .lhs = locate(loc, try e(a, .{
                     .unaryop = .{
                         .op = .grouping,
-                        .e = try e(a, .{
+                        .e = locate(loc, try e(a, .{
                             .binop = .{
                                 .op = .multiply,
-                                .lhs = try e(a, .{ .integer = 1 }),
-                                .rhs = try e(a, .{ .integer = 2 }),
+                                .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+                                .rhs = locate(loc, try e(a, .{ .integer = 2 })),
                             },
-                        }),
+                        })),
                     },
-                }),
-                .rhs = try e(a, .{ .integer = 3 }),
+                })),
+                .rhs = locate(loc, try e(a, .{ .integer = 3 })),
             } },
         );
     }
@@ -452,7 +480,7 @@ const Tests = struct {
 
         try expectEqualParse(
             &.{ .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .semicolon },
-            Statement{ .assignment = .{ .identifier = "a", .expression = try e(a, .{ .integer = 1 }) } },
+            Statement{ .assignment = .{ .identifier = "a", .expression = locate(loc, try e(a, .{ .integer = 1 })) } },
         );
 
         try expectEqualParse(&.{
@@ -464,17 +492,17 @@ const Tests = struct {
             .asterisk,
             .{ .integer = 3 },
             .semicolon,
-        }, Statement{ .assignment = .{ .identifier = "a", .expression = try e(a, .{ .binop = .{
+        }, Statement{ .assignment = .{ .identifier = "a", .expression = locate(loc, try e(a, .{ .binop = .{
             .op = .plus,
-            .lhs = try e(a, .{ .integer = 1 }),
-            .rhs = try e(a, .{
+            .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+            .rhs = locate(loc, try e(a, .{
                 .binop = .{
                     .op = .multiply,
-                    .lhs = try e(a, .{ .integer = 2 }),
-                    .rhs = try e(a, .{ .integer = 3 }),
+                    .lhs = locate(loc, try e(a, .{ .integer = 2 })),
+                    .rhs = locate(loc, try e(a, .{ .integer = 3 })),
                 },
-            }),
-        } }) } });
+            })),
+        } })) } });
     }
 
     test "fail: assignments" {

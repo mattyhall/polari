@@ -52,8 +52,8 @@ fn DotWriter(comptime W: anytype) type {
                     , .{ e_id, i });
                 },
                 .binop => |binop| {
-                    const lhs_id = try self.writeExpression(binop.lhs);
-                    const rhs_id = try self.writeExpression(binop.rhs);
+                    const lhs_id = try self.writeExpression(binop.lhs.inner);
+                    const rhs_id = try self.writeExpression(binop.rhs.inner);
                     const op = switch (binop.op) {
                         .plus => "+",
                         .minus => "-",
@@ -69,7 +69,7 @@ fn DotWriter(comptime W: anytype) type {
                     , .{ .e_id = e_id, .lhs_id = lhs_id, .rhs_id = rhs_id, .op = op });
                 },
                 .unaryop => |unaryop| {
-                    const child_id = try self.writeExpression(unaryop.e);
+                    const child_id = try self.writeExpression(unaryop.e.inner);
                     const op = switch (unaryop.op) {
                         .negate => "-",
                         .grouping => "()",
@@ -95,7 +95,7 @@ fn DotWriter(comptime W: anytype) type {
             );
 
             for (program.stmts.items) |stmt| {
-                switch (stmt) {
+                switch (stmt.inner) {
                     .assignment => |a| {
                         const s_id = self.id();
                         const i_id = self.id();
@@ -105,7 +105,7 @@ fn DotWriter(comptime W: anytype) type {
                             \\
                         , .{ .i_id = i_id, .name = a.identifier });
 
-                        const e_id = try self.writeExpression(a.expression);
+                        const e_id = try self.writeExpression(a.expression.inner);
                         try self.w.print(
                             \\  s_{[s_id]} [label="=",color="white",fontcolor="white"]
                             \\  s_{[s_id]} -- i_{[i_id]} [color="white"]
