@@ -203,8 +203,10 @@ const This = @This();
 test "all" {
     const bytecode = @import("bytecode.zig");
     const compiler = @import("compiler.zig");
+    const vm = @import("vm.zig");
 
     std.testing.refAllDecls(This);
     std.testing.refAllDecls(bytecode);
     std.testing.refAllDecls(compiler);
+    std.testing.refAllDecls(vm);
 }
