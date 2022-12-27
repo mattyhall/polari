@@ -10,6 +10,7 @@ pub const log_level: std.log.Level = .info;
 pub const Opts = struct {
     @"dump-ast": bool = false,
     @"dump-rules": bool = false,
+    @"dump-type-checking": bool = false,
 };
 
 fn readStdin(gpa: std.mem.Allocator) ![]const u8 {
@@ -187,6 +188,9 @@ pub fn main() !void {
         var w = std.io.getStdOut().writer();
         try s.printRules(w);
     }
+
+    s.debug = opts.args.@"dump-type-checking";
+    try s.solve();
 }
 
 const This = @This();
