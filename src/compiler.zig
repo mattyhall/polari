@@ -46,8 +46,11 @@ pub const Compiler = struct {
 
     fn compileExpression(self: *Compiler, expr: *const parser.Expression) !void {
         switch (expr.*) {
-            .integer => |i| try self.writeConst(try self.chunk.addConstant(.{ .integer = i })),
-            .boolean => |b| try self.writeConst(try self.chunk.addConstant(.{ .boolean = b })),
+            .integer => |i| if (i == 1 or i == -1)
+                try self.chunk.writeOp(if (i == 1) .one else .neg_one)
+            else
+                try self.writeConst(try self.chunk.addConstant(.{ .integer = i })),
+            .boolean => |b| try self.chunk.writeOp(if (b) .true else .false),
             .identifier => |n| try self.writeLocal(.get, self.chunk.getLocal(n) orelse unreachable),
             .binop, .unaryop => @panic("not implemented"),
         }
@@ -102,12 +105,12 @@ test "constants" {
     );
 
     try testCompile("true;",
-        \\CONST  c0    ; true
+        \\TRUE  
         \\
     );
 
     try testCompile("a = true;",
-        \\CONST  c0    ; true
+        \\TRUE  
         \\SET    l0    ; a
         \\
     );

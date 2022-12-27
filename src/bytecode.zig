@@ -31,15 +31,18 @@ pub const Op = enum(u8) {
 
     /// GET a: a gives the index into the locals array to push onto the stack.
     get8,
-
     /// SET a: sets the local with index a to the value on the top of the stack.
     set8,
 
-    /// ONE: pushes 1 onto the stack
+    /// ONE: pushes 1 onto the stack.
     one,
-
-    /// NONE: pushes -1 onto the stack
+    /// NONE: pushes -1 onto the stack.
     neg_one,
+
+    /// TRUE: adds true to the stack.
+    true,
+    /// FALSE: adds false to the stack.
+    false,
 
     /// RARE a: a is a RareOp.
     rare,
@@ -51,6 +54,8 @@ pub const Op = enum(u8) {
             .set8 => .{ .op = "SET", .rest = " l" },
             .one => .{ .op = "ONE", .rest = "" },
             .neg_one => .{ .op = "NONE", .rest = "" },
+            .true => .{ .op = "TRUE", .rest = "" },
+            .false => .{ .op = "FALSE", .rest = "" },
             .rare => return,
         };
 
@@ -199,7 +204,7 @@ pub const Chunk = struct {
                         else => unreachable,
                     }
                 },
-                .one, .neg_one => try op.print(writer),
+                .one, .neg_one, .true, .false => try op.print(writer),
                 .rare => {
                     i += 1;
                     try self.disassembleRare(&i, writer);

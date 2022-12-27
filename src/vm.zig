@@ -55,6 +55,8 @@ pub const Vm = struct {
                 },
                 .one => try self.stack.append(self.gpa, .{ .integer = 1 }),
                 .neg_one => try self.stack.append(self.gpa, .{ .integer = -1 }),
+                .true => try self.stack.append(self.gpa, .{ .boolean = true }),
+                .false => try self.stack.append(self.gpa, .{ .boolean = false }),
                 .rare => try self.runRare(),
             }
         }
@@ -96,13 +98,11 @@ test "locals" {
     defer chunk.deinit();
 
     _ = try chunk.addConstant(.{ .integer = 147 });
-    _ = try chunk.addConstant(.{ .boolean = true });
     try chunk.writeOp(.const8);
     try chunk.writeU8(0);
     try chunk.writeOp(.set8);
     try chunk.writeU8(0);
-    try chunk.writeOp(.const8);
-    try chunk.writeU8(1);
+    try chunk.writeOp(.true);
     try chunk.writeOp(.set8);
     try chunk.writeU8(1);
     try chunk.writeOp(.get8);
