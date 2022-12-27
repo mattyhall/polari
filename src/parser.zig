@@ -74,12 +74,9 @@ pub const Statement = union(enum) {
     expression: *Expression,
 };
 
-/// Locate wraps T in a struct with a Loc.
-fn Located(comptime T: anytype) type {
-    return struct {
-        loc: Loc,
-        inner: T,
-    };
+/// Located wraps T in a struct with a Loc.
+pub fn Located(comptime T: anytype) type {
+    return struct { loc: Loc, inner: T };
 }
 
 /// locate puts v in its Located struct, with loc as the location.

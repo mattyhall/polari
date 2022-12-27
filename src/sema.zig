@@ -21,11 +21,13 @@
 const std = @import("std");
 const parser = @import("parser.zig");
 
+const Located = parser.Located;
+
 const Type = enum { bool, int };
 
 /// Something that can be given a type.
 const Variable = union(enum) {
-    expr: *const parser.Expression,
+    expr: Located(*const parser.Expression),
     identifier: []const u8,
 };
 
@@ -59,7 +61,7 @@ fn hashFn(comptime Context: type) (fn (Context, Variable) u64) {
     return struct {
         fn hash(_: Context, v: Variable) u64 {
             return switch (v) {
-                .expr => |e| @intCast(u64, @ptrToInt(e)),
+                .expr => |e| @intCast(u64, @ptrToInt(e.inner)),
                 .identifier => |i| std.hash_map.hashString(i),
             };
         }
@@ -73,7 +75,7 @@ fn eqlFn(comptime Context: type) (fn (Context, Variable, Variable) bool) {
 
             return switch (lhs) {
                 .identifier => |i| std.mem.eql(u8, i, rhs.identifier),
-                .expr => |e| e == rhs.expr,
+                .expr => |e| e.inner == rhs.expr.inner,
             };
         }
     }.eql;
@@ -100,6 +102,7 @@ pub const Sema = struct {
     map: Map,
     program: *const parser.Program,
 
+    diags: std.ArrayListUnmanaged(lexer.Diag) = std.ArrayListUnmanaged(lexer.Diag){},
     debug: bool = false,
 
     const Error = error{ OutOfMemory, VariableNotFound, CouldNotInferType, TypeMismatch, WrongNumberOfArgs };
@@ -108,19 +111,19 @@ pub const Sema = struct {
         return .{ .gpa = gpa, .map = Map{}, .program = program };
     }
 
-    fn generateRulesForExpression(self: *Sema, expr: *const parser.Expression) Error!void {
-        var rule: Rule = switch (expr.*) {
+    fn generateRulesForExpression(self: *Sema, expr: Located(*parser.Expression)) Error!void {
+        var rule: Rule = switch (expr.inner.*) {
             .integer => Rule{ .type = .int },
             .boolean => Rule{ .type = .bool },
             .binop => |binop| b: {
-                try self.generateRulesForExpression(binop.lhs.inner);
-                try self.generateRulesForExpression(binop.rhs.inner);
+                try self.generateRulesForExpression(binop.lhs);
+                try self.generateRulesForExpression(binop.rhs);
 
                 var args = try self.gpa.alloc(Variable, 2);
                 errdefer self.gpa.free(args);
 
-                args[0] = .{ .expr = binop.lhs.inner };
-                args[1] = .{ .expr = binop.rhs.inner };
+                args[0] = .{ .expr = .{ .loc = binop.lhs.loc, .inner = binop.lhs.inner } };
+                args[1] = .{ .expr = .{ .loc = binop.rhs.loc, .inner = binop.rhs.inner } };
 
                 const op = switch (binop.op) {
                     .plus => "+",
@@ -133,16 +136,16 @@ pub const Sema = struct {
             },
             .unaryop => |unaryop| b: {
                 if (unaryop.op == .grouping) {
-                    try self.generateRulesForExpression(unaryop.e.inner);
-                    break :b Rule{ .unify = .{ .expr = unaryop.e.inner } };
+                    try self.generateRulesForExpression(unaryop.e);
+                    break :b Rule{ .unify = .{ .expr = .{ .loc = unaryop.e.loc, .inner = unaryop.e.inner } } };
                 }
 
-                try self.generateRulesForExpression(unaryop.e.inner);
+                try self.generateRulesForExpression(unaryop.e);
 
                 var args = try self.gpa.alloc(Variable, 1);
                 errdefer self.gpa.free(args);
 
-                args[0] = .{ .expr = unaryop.e.inner };
+                args[0] = .{ .expr = .{ .loc = unaryop.e.loc, .inner = unaryop.e.inner } };
 
                 const op = switch (unaryop.op) {
                     .negate => "-",
@@ -156,7 +159,7 @@ pub const Sema = struct {
 
         var gop = try self.map.getOrPutValue(
             self.gpa,
-            .{ .expr = expr },
+            .{ .expr = .{ .loc = expr.loc, .inner = expr.inner } },
             .{ .signature = null, .inferred = undefined },
         );
         gop.value_ptr.inferred = rule;
@@ -166,23 +169,23 @@ pub const Sema = struct {
         for (self.program.stmts.items) |stmt| {
             switch (stmt.inner) {
                 .assignment => |a| {
-                    try self.generateRulesForExpression(a.expression.inner);
+                    try self.generateRulesForExpression(a.expression);
 
                     const gop = try self.map.getOrPutValue(
                         self.gpa,
                         .{ .identifier = a.identifier },
                         .{ .signature = null, .inferred = undefined },
                     );
-                    gop.value_ptr.inferred = .{ .unify = .{ .expr = a.expression.inner } };
+                    gop.value_ptr.inferred = .{ .unify = .{ .expr = .{ .loc = a.expression.loc, .inner = a.expression.inner } } };
                 },
-                .expression => |e| try self.generateRulesForExpression(e),
+                .expression => |e| try self.generateRulesForExpression(.{ .loc = stmt.loc, .inner = e }),
             }
         }
     }
 
     fn printVariable(v: Variable, writer: anytype) !void {
         switch (v) {
-            .expr => |e| try e.write(writer),
+            .expr => |e| try e.inner.write(writer),
             .identifier => |i| try writer.print("<{s}>", .{i}),
         }
     }
@@ -235,6 +238,13 @@ pub const Sema = struct {
         return true;
     }
 
+    fn allocDiag(self: *Sema, loc: lexer.Loc, comptime fmt: []const u8, args: anytype) !void {
+        var msg = try std.fmt.allocPrint(self.gpa, fmt, args);
+        errdefer self.gpa.free(msg);
+
+        try self.diags.append(self.gpa, .{ .loc = loc, .msg = msg, .allocator = self.gpa });
+    }
+
     fn solveApply(self: *const Sema, apply: Apply) Error!?Type {
         if (!try self.allResolved(apply.arguments)) return null;
 
@@ -274,7 +284,11 @@ pub const Sema = struct {
                 switch (entry.value_ptr.*.inferred) {
                     .type => continue,
                     .unify => |v| {
-                        const e = self.map.get(v) orelse return error.VariableNotFound;
+                        const e = self.map.get(v) orelse {
+                            const key = entry.key_ptr.expr;
+                            try self.allocDiag(key.loc, "variable not found: {s}", .{v.identifier});
+                            return error.VariableNotFound;
+                        };
                         switch (e.inferred) {
                             .type => |t| try updates.put(self.gpa, entry.key_ptr.*, t),
                             else => {},
@@ -294,7 +308,7 @@ pub const Sema = struct {
 
             var uit = updates.iterator();
             while (uit.next()) |entry| {
-                var e = self.map.getEntry(entry.key_ptr.*) orelse return error.VariableNotFound;
+                var e = self.map.getEntry(entry.key_ptr.*) orelse unreachable;
                 e.value_ptr.inferred.deinit(self.gpa);
                 e.value_ptr.inferred = .{ .type = entry.value_ptr.* };
             }
@@ -308,18 +322,21 @@ pub const Sema = struct {
         while (it.next()) |entry| {
             switch (entry.value_ptr.*.inferred) {
                 .type => {},
-                else => return error.CouldNotInferType,
+                else => {
+                    try self.allocDiag(entry.key_ptr.expr.loc, "could not infer type", .{});
+                    return error.CouldNotInferType;
+                },
             }
         }
     }
 
     pub fn deinit(self: *Sema) void {
         var it = self.map.iterator();
-        while (it.next()) |e| {
-            e.value_ptr.inferred.deinit(self.gpa);
-        }
-
+        while (it.next()) |e| e.value_ptr.inferred.deinit(self.gpa);
         self.map.deinit(self.gpa);
+
+        for (self.diags.items) |*diag| diag.deinit();
+        self.diags.deinit(self.gpa);
     }
 };
 

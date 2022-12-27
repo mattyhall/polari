@@ -190,7 +190,12 @@ pub fn main() !void {
     }
 
     s.debug = opts.args.@"dump-type-checking";
-    try s.solve();
+    s.solve() catch |e| {
+        if (s.diags.items.len == 0) return e;
+
+        try utils.printErrors(source, s.diags.items);
+        std.os.exit(1);
+    };
 }
 
 const This = @This();
