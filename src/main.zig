@@ -4,6 +4,8 @@ const parser = @import("parser.zig");
 const utils = @import("utils.zig");
 const sema = @import("sema.zig");
 const simargs = @import("simargs");
+const compiler = @import("compiler.zig");
+const vm = @import("vm.zig");
 
 pub const log_level: std.log.Level = .info;
 
@@ -11,6 +13,7 @@ pub const Opts = struct {
     @"dump-ast": bool = false,
     @"dump-rules": bool = false,
     @"dump-type-checking": bool = false,
+    @"dump-bytecode": bool = false,
 };
 
 fn readStdin(gpa: std.mem.Allocator) ![]const u8 {
@@ -196,17 +199,35 @@ pub fn main() !void {
         try utils.printErrors(source, s.diags.items);
         std.os.exit(1);
     };
+
+    var c = compiler.Compiler.init(gpa.allocator(), &program);
+    defer c.deinit();
+
+    try c.compile();
+
+    if (opts.args.@"dump-bytecode") {
+        var w = std.io.getStdOut().writer();
+        try c.chunk.diassemble(w);
+    }
+
+    var machine = vm.Vm.init(gpa.allocator(), c.chunk);
+    defer machine.deinit();
+
+    try machine.run();
+
+    var w = std.io.getStdOut().writer();
+    try w.writeAll("stack\n");
+    for (machine.stack.items) |v| {
+        try v.print(w);
+        try w.writeAll("\n");
+    }
 }
 
 const This = @This();
 
 test "all" {
     const bytecode = @import("bytecode.zig");
-    const compiler = @import("compiler.zig");
-    const vm = @import("vm.zig");
 
     std.testing.refAllDecls(This);
     std.testing.refAllDecls(bytecode);
-    std.testing.refAllDecls(compiler);
-    std.testing.refAllDecls(vm);
 }

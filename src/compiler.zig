@@ -5,7 +5,7 @@ const parser = @import("parser.zig");
 const sema = @import("sema.zig");
 
 /// Compile takes a program and compiles it into bytecode.
-const Compiler = struct {
+pub const Compiler = struct {
     gpa: std.mem.Allocator,
     chunk: bc.Chunk,
     program: *const parser.Program,
