@@ -105,7 +105,7 @@ pub const Sema = struct {
     diags: std.ArrayListUnmanaged(lexer.Diag) = std.ArrayListUnmanaged(lexer.Diag){},
     debug: bool = false,
 
-    const Error = error{ OutOfMemory, VariableNotFound, CouldNotInferType, TypeMismatch, WrongNumberOfArgs };
+    const Error = error{ OutOfMemory, VariableNotFound, CouldNotInferType, TypeMismatch, WrongNumberOfArgs, Recursion };
 
     pub fn init(gpa: std.mem.Allocator, program: *const parser.Program) Sema {
         return .{ .gpa = gpa, .map = Map{}, .program = program };
@@ -190,38 +190,40 @@ pub const Sema = struct {
         }
     }
 
+    fn printRule(r: Rule, writer: anytype) !void {
+        switch (r) {
+            .type => |t| switch (t) {
+                .int => try writer.print("Int", .{}),
+                .bool => try writer.print("Bool", .{}),
+            },
+            .unify => |v| {
+                try writer.print("Unify ", .{});
+                try printVariable(v, writer);
+            },
+            .apply => |a| {
+                try writer.print("Apply ", .{});
+
+                switch (a.f) {
+                    .variable => |v| try printVariable(v, writer),
+                    .builtin => |s| try writer.print("{s}", .{s}),
+                }
+                try writer.print(" ", .{});
+
+                for (a.arguments) |arg| {
+                    try printVariable(arg, writer);
+                    try writer.print(" ", .{});
+                }
+            },
+        }
+    }
+
     pub fn printRules(self: *const Sema, writer: anytype) !void {
         try writer.writeAll("================================\n");
         var it = self.map.iterator();
         while (it.next()) |entry| {
             try printVariable(entry.key_ptr.*, writer);
             try writer.print(" : ", .{});
-
-            switch (entry.value_ptr.inferred) {
-                .type => |t| switch (t) {
-                    .int => try writer.print("Int", .{}),
-                    .bool => try writer.print("Bool", .{}),
-                },
-                .unify => |v| {
-                    try writer.print("Unify ", .{});
-                    try printVariable(v, writer);
-                },
-                .apply => |a| {
-                    try writer.print("Apply ", .{});
-
-                    switch (a.f) {
-                        .variable => |v| try printVariable(v, writer),
-                        .builtin => |s| try writer.print("{s}", .{s}),
-                    }
-                    try writer.print(" ", .{});
-
-                    for (a.arguments) |arg| {
-                        try printVariable(arg, writer);
-                        try writer.print(" ", .{});
-                    }
-                },
-            }
-
+            try printRule(entry.value_ptr.inferred, writer);
             try writer.print("\n", .{});
         }
     }
@@ -245,6 +247,43 @@ pub const Sema = struct {
         try self.diags.append(self.gpa, .{ .loc = loc, .msg = msg, .allocator = self.gpa });
     }
 
+    fn checkForRecursion(self: *Sema, loc: lexer.Loc, needle: Variable, haystack: Rule) !void {
+        var e = switch (needle) {
+            .expr => |e| e,
+            .identifier => return,
+        };
+
+        switch (haystack) {
+            .unify => |v| switch (v) {
+                .expr => |e2| b: {
+                    if (e.inner == e2.inner) break :b;
+
+                    var r = self.map.get(v) orelse unreachable;
+                    return try self.checkForRecursion(loc, needle, r.inferred);
+                },
+                .identifier => |i| {
+                    var r = self.map.get(.{ .identifier = i }) orelse unreachable;
+                    return try self.checkForRecursion(loc, needle, r.inferred);
+                },
+            },
+            .apply => |a| b: {
+                for (a.arguments) |arg| {
+                    switch (arg) {
+                        .expr => |e2| if (e.inner == e2.inner) break :b,
+                        else => {},
+                    }
+
+                    var r = self.map.get(arg) orelse unreachable;
+                    return try self.checkForRecursion(loc, needle, r.inferred);
+                }
+            },
+            .type => return,
+        }
+
+        try self.allocDiag(loc, "variable cannot refer to itself", .{});
+        return error.Recursion;
+    }
+
     fn solveApply(self: *const Sema, apply: Apply) Error!?Type {
         if (!try self.allResolved(apply.arguments)) return null;
 
@@ -252,8 +291,9 @@ pub const Sema = struct {
             .builtin => |b| {
                 if (std.mem.indexOf(u8, "+/*-", b) != null) {
                     const is_minus = std.mem.eql(u8, "-", b);
-                    if (is_minus and apply.arguments.len != 1 and apply.arguments.len != 2)
+                    if (is_minus and apply.arguments.len != 1 and apply.arguments.len != 2) {
                         return error.WrongNumberOfArgs;
+                    }
 
                     if (!is_minus and apply.arguments.len != 2) return error.WrongNumberOfArgs;
 
@@ -320,9 +360,11 @@ pub const Sema = struct {
 
         var it = self.map.iterator();
         while (it.next()) |entry| {
-            switch (entry.value_ptr.*.inferred) {
+            switch (entry.value_ptr.inferred) {
                 .type => {},
                 else => {
+                    try self.checkForRecursion(entry.key_ptr.expr.loc, entry.key_ptr.*, entry.value_ptr.inferred);
+
                     try self.allocDiag(entry.key_ptr.expr.loc, "could not infer type", .{});
                     return error.CouldNotInferType;
                 },
