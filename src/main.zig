@@ -201,5 +201,8 @@ pub fn main() !void {
 const This = @This();
 
 test "all" {
-    std.testing.refAllDeclsRecursive(This);
+    const bytecode = @import("bytecode.zig");
+
+    std.testing.refAllDecls(This);
+    std.testing.refAllDecls(bytecode);
 }
