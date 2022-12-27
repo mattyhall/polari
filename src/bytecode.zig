@@ -13,12 +13,12 @@ pub const Local = struct {
 pub const Locals = std.ArrayListUnmanaged(Local);
 
 pub const Value = union(enum) {
-    int: i64,
+    integer: i64,
     boolean: bool,
 
     pub fn print(self: Value, w: anytype) !void {
         switch (self) {
-            .int => |i| try w.print("{}", .{i}),
+            .integer => |i| try w.print("{}", .{i}),
             .boolean => |b| try w.print("{}", .{b}),
         }
     }
@@ -232,7 +232,7 @@ test "disassemble" {
     var chunk = Chunk.init(testing.allocator);
     defer chunk.deinit();
 
-    _ = try chunk.addConstant(.{ .int = 147 });
+    _ = try chunk.addConstant(.{ .integer = 147 });
     _ = try chunk.addLocal("foo");
     _ = try chunk.addLocal("bar");
 
