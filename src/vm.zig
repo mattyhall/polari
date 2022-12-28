@@ -13,18 +13,22 @@ pub const Vm = struct {
         return Vm{ .gpa = gpa, .chunk = chunk };
     }
 
+    /// pop pops a value off the stack, returning an error if there isn't one.
     fn pop(self: *Vm) !bc.Value {
         if (self.stack.items.len == 0) return error.CouldNotParse;
 
         return self.stack.pop();
     }
 
+    /// runRare assumes the next op is a rare one and runs it.
     fn runRare(self: *Vm) !void {
         _ = self;
         @panic("unimplemented");
     }
 
+    /// runBinop assumes op in a binary operation and runs it.
     fn runBinop(self: *Vm, op: bc.Op) !void {
+        // The stack is FIFO so the right operand is at the very end.
         const b = try self.pop();
         const a = try self.pop();
         if (a != .integer or b != .integer) return error.WrongType;
@@ -38,6 +42,7 @@ pub const Vm = struct {
         } });
     }
 
+    /// run interprets the bytecode in chunk.
     pub fn run(self: *Vm) !void {
         while (self.pc < self.chunk.code.items.len) {
             const op = try std.meta.intToEnum(bc.Op, self.chunk.code.items[self.pc]);
@@ -66,6 +71,8 @@ pub const Vm = struct {
                     if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc];
                     self.pc += 1;
+                    // TODO: could cause OOM errors on bad input. Can we assume i is the current size and just use
+                    // append here? Or do we need to bound it to something sensible?
                     try self.locals.resize(self.gpa, i + 1);
                     self.locals.items[i] = self.stack.pop();
                 },
