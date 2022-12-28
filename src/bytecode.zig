@@ -54,6 +54,9 @@ pub const Op = enum(u8) {
     /// stack.
     divide,
 
+    // NEG: negates the last value on the stack and pushes the result onto the stack.
+    negate,
+
     /// RARE a: a is a RareOp.
     rare,
 
@@ -70,6 +73,7 @@ pub const Op = enum(u8) {
             .subtract => .{ .op = "SUB", .rest = "" },
             .multiply => .{ .op = "MULT", .rest = "" },
             .divide => .{ .op = "DIV", .rest = "" },
+            .negate => .{ .op = "NEG", .rest = "" },
             .rare => return,
         };
 
@@ -218,7 +222,7 @@ pub const Chunk = struct {
                         else => unreachable,
                     }
                 },
-                .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide => try op.print(writer),
+                .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide, .negate => try op.print(writer),
                 .rare => {
                     i += 1;
                     try self.disassembleRare(&i, writer);

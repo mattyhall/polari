@@ -81,6 +81,11 @@ pub const Vm = struct {
                 .true => try self.stack.append(self.gpa, .{ .boolean = true }),
                 .false => try self.stack.append(self.gpa, .{ .boolean = false }),
                 .add, .subtract, .multiply, .divide => try self.runBinop(op),
+                .negate => {
+                    const arg = try self.pop();
+                    if (arg != .integer) return error.WrongType;
+                    self.stack.appendAssumeCapacity(.{ .integer = arg.integer * -1 });
+                },
                 .rare => try self.runRare(),
             }
         }
@@ -150,8 +155,9 @@ test "maths" {
     try chunk.writeOp(.const8);
     try chunk.writeU8(1); // 3
     try chunk.writeOp(.subtract); // 2 - 3
+    try chunk.writeOp(.negate); // *-1;
 
     try testExpectStack(chunk, &.{
-        .{ .integer = -1 },
+        .{ .integer = 1 },
     });
 }

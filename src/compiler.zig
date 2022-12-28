@@ -62,7 +62,10 @@ pub const Compiler = struct {
                     .divide => .divide,
                 });
             },
-            .unaryop => @panic("not implemented"),
+            .unaryop => |unaryop| {
+                try self.compileExpression(unaryop.e.inner);
+                try self.chunk.writeOp(.negate);
+            },
         }
     }
 
