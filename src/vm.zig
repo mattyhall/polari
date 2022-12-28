@@ -16,7 +16,7 @@ pub const Vm = struct {
     fn pop(self: *Vm) !bc.Value {
         if (self.stack.items.len == 0) return error.CouldNotParse;
 
-        return self.stack.items.pop();
+        return self.stack.pop();
     }
 
     fn runRare(self: *Vm) !void {
@@ -24,14 +24,28 @@ pub const Vm = struct {
         @panic("unimplemented");
     }
 
+    fn runBinop(self: *Vm, op: bc.Op) !void {
+        const b = try self.pop();
+        const a = try self.pop();
+        if (a != .integer or b != .integer) return error.WrongType;
+
+        self.stack.appendAssumeCapacity(.{ .integer = switch (op) {
+            .add => a.integer + b.integer,
+            .subtract => a.integer - b.integer,
+            .multiply => a.integer * b.integer,
+            .divide => @divFloor(a.integer, b.integer),
+            else => unreachable,
+        } });
+    }
+
     pub fn run(self: *Vm) !void {
         while (self.pc < self.chunk.code.items.len) {
             const op = try std.meta.intToEnum(bc.Op, self.chunk.code.items[self.pc]);
             self.pc += 1;
-            if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
 
             switch (op) {
                 .const8 => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc];
                     self.pc += 1;
                     if (i >= self.chunk.constants.items.len)
@@ -40,6 +54,7 @@ pub const Vm = struct {
                     try self.stack.append(self.gpa, self.chunk.constants.items[i]);
                 },
                 .get8 => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc];
                     self.pc += 1;
                     if (i >= self.locals.items.len)
@@ -48,6 +63,7 @@ pub const Vm = struct {
                     try self.stack.append(self.gpa, self.locals.items[i]);
                 },
                 .set8 => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc];
                     self.pc += 1;
                     try self.locals.resize(self.gpa, i + 1);
@@ -57,6 +73,7 @@ pub const Vm = struct {
                 .neg_one => try self.stack.append(self.gpa, .{ .integer = -1 }),
                 .true => try self.stack.append(self.gpa, .{ .boolean = true }),
                 .false => try self.stack.append(self.gpa, .{ .boolean = false }),
+                .add, .subtract, .multiply, .divide => try self.runBinop(op),
                 .rare => try self.runRare(),
             }
         }
@@ -111,4 +128,23 @@ test "locals" {
     try chunk.writeU8(1);
 
     try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } });
+}
+
+test "maths" {
+    var chunk = bc.Chunk.init(testing.allocator);
+    defer chunk.deinit();
+
+    _ = try chunk.addConstant(.{ .integer = 2 });
+    _ = try chunk.addConstant(.{ .integer = 3 });
+    try chunk.writeOp(.const8);
+    try chunk.writeU8(0); // 2
+    try chunk.writeOp(.one); // 1
+    try chunk.writeOp(.divide); // 2/1 => 2
+    try chunk.writeOp(.const8);
+    try chunk.writeU8(1); // 3
+    try chunk.writeOp(.subtract); // 2 - 3
+
+    try testExpectStack(chunk, &.{
+        .{ .integer = -1 },
+    });
 }

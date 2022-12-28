@@ -52,7 +52,17 @@ pub const Compiler = struct {
                 try self.writeConst(try self.chunk.addConstant(.{ .integer = i })),
             .boolean => |b| try self.chunk.writeOp(if (b) .true else .false),
             .identifier => |n| try self.writeLocal(.get, self.chunk.getLocal(n) orelse unreachable),
-            .binop, .unaryop => @panic("not implemented"),
+            .binop => |binop| {
+                try self.compileExpression(binop.lhs.inner);
+                try self.compileExpression(binop.rhs.inner);
+                try self.chunk.writeOp(switch (binop.op) {
+                    .plus => .add,
+                    .minus => .subtract,
+                    .multiply => .multiply,
+                    .divide => .divide,
+                });
+            },
+            .unaryop => @panic("not implemented"),
         }
     }
 
@@ -112,6 +122,19 @@ test "constants" {
     try testCompile("a = true;",
         \\TRUE  
         \\SET    l0    ; a
+        \\
+    );
+}
+
+test "maths" {
+    try testCompile("3*2 + 6/3;",
+        \\CONST  c0    ; 3
+        \\CONST  c1    ; 2
+        \\MULT  
+        \\CONST  c2    ; 6
+        \\CONST  c3    ; 3
+        \\DIV   
+        \\ADD   
         \\
     );
 }
