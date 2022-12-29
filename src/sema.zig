@@ -191,8 +191,20 @@ pub const Sema = struct {
 
                 break :b Rule{ .apply = .{ .f = .{ .builtin = op }, .arguments = args } };
             },
-            .identifier => |i| Rule{ .unify = .{ .identifier = (try self.findId(expr.loc, i, true)).id } },
-            .let => @panic("not implemented"),
+            .identifier => |i| Rule{ .unify = .{ .identifier = (try self.findId(expr.loc, i)).id } },
+            .let => |let| b: {
+                // let defines a new scope so create a new VarMap and put everything in it.
+                try self.var_maps.append(self.gpa, .{});
+
+                for (let.assignments) |*a| try self.generateRulesForAssignment(a.loc, &a.inner);
+                try self.generateRulesForExpression(let.in);
+
+                var map = self.var_maps.pop();
+                map.deinit(self.gpa);
+
+                // The type of a let is the type of it's in clause, so unify.
+                break :b Rule{ .unify = .{ .expr = .{ .loc = let.in.loc, .inner = let.in.inner } } };
+            },
         };
 
         var gop = try self.map.getOrPutValue(
@@ -204,12 +216,12 @@ pub const Sema = struct {
     }
 
     /// findId finds the deepest identifier id with the name identifier.
-    fn findId(self: *Sema, loc: lexer.Loc, identifier: []const u8, diag: bool) Error!FindResult {
+    fn findId(self: *Sema, loc: lexer.Loc, identifier: []const u8) Error!FindResult {
         var i: usize = self.var_maps.items.len - 1;
         while (true) : (i -= 1) {
             const id = self.var_maps.items[i].get(identifier) orelse {
                 if (i == 0) {
-                    if (diag) try self.allocDiag(loc, "undeclared variable {s}", .{identifier});
+                    try self.allocDiag(loc, "undeclared variable {s}", .{identifier});
                     return error.VariableNotFound;
                 }
 
@@ -220,6 +232,28 @@ pub const Sema = struct {
         }
     }
 
+    fn generateRulesForAssignment(self: *Sema, loc: lexer.Loc, assignment: *const parser.Assignment) Error!void {
+        try self.generateRulesForExpression(assignment.expression);
+
+        if (self.currentVarMap().contains(assignment.identifier)) {
+            try self.allocDiag(loc, "redefinition of variable {s}", .{assignment.identifier});
+            return error.Redefinition;
+        }
+
+        const id = self.getId();
+        try self.currentVarMap().put(self.gpa, assignment.identifier, id);
+        try self.map.put(self.gpa, .{ .identifier = id }, .{ .signature = null, .inferred = .uninitialised });
+
+        const gop = try self.map.getOrPutValue(
+            self.gpa,
+            .{ .identifier = id },
+            .{ .signature = null, .inferred = undefined },
+        );
+        gop.value_ptr.inferred = .{ .unify = .{
+            .expr = .{ .loc = assignment.expression.loc, .inner = assignment.expression.inner },
+        } };
+    }
+
     pub fn generateRules(self: *Sema) Error!void {
         try self.var_maps.append(self.gpa, .{});
         // Prepopulate the globals with uninitialised so we do not get a variable not found error when a statement
@@ -227,11 +261,7 @@ pub const Sema = struct {
         for (self.program.stmts.items) |stmt| {
             switch (stmt.inner) {
                 .assignment => |a| {
-                    var res: ?FindResult = self.findId(.{}, a.identifier, false) catch |e| switch (e) {
-                        error.VariableNotFound => null,
-                        else => return e,
-                    };
-                    if (res != null) {
+                    if (self.var_maps.items[0].contains(a.identifier)) {
                         try self.allocDiag(stmt.loc, "redefinition of variable {s}", .{a.identifier});
                         return error.Redefinition;
                     }
@@ -246,17 +276,18 @@ pub const Sema = struct {
 
         for (self.program.stmts.items) |stmt| {
             switch (stmt.inner) {
-                .assignment => |a| {
-                    try self.generateRulesForExpression(a.expression);
+                .assignment => |assignment| {
+                    try self.generateRulesForExpression(assignment.expression);
 
-                    const id = try self.findId(stmt.loc, a.identifier, true);
+                    const id = try self.findId(stmt.loc, assignment.identifier);
+
                     const gop = try self.map.getOrPutValue(
                         self.gpa,
                         .{ .identifier = id.id },
                         .{ .signature = null, .inferred = undefined },
                     );
                     gop.value_ptr.inferred = .{ .unify = .{
-                        .expr = .{ .loc = a.expression.loc, .inner = a.expression.inner },
+                        .expr = .{ .loc = assignment.expression.loc, .inner = assignment.expression.inner },
                     } };
                 },
                 .expression => |e| try self.generateRulesForExpression(.{ .loc = stmt.loc, .inner = e }),
@@ -590,6 +621,53 @@ test "fail: maths" {
 test "fail: assignment" {
     try expectTypeCheckError(
         &.{ .{ .identifier = "a" }, .equals, .true, .semicolon, .{ .identifier = "a" }, .equals, .true, .semicolon },
+        error.Redefinition,
+    );
+}
+
+test "scopes" {
+    try expectTypeCheck(
+        &.{
+            .{ .identifier = "a" },
+            .equals,
+            .true,
+            .semicolon,
+            .{ .identifier = "b" },
+            .equals,
+            .let,
+            .{ .identifier = "a" },
+            .equals,
+            .{ .integer = 1 },
+            .semicolon,
+            .in,
+            .{ .identifier = "a" },
+            .semicolon,
+        },
+        &.{
+            .{ .ident = "a", .type = .bool },
+            .{ .ident = "b", .type = .int },
+        },
+    );
+}
+
+test "fail: scopes" {
+    try expectTypeCheckError(
+        &.{
+            .{ .identifier = "b" },
+            .equals,
+            .let,
+            .{ .identifier = "a" },
+            .equals,
+            .{ .integer = 1 },
+            .semicolon,
+            .{ .identifier = "a" },
+            .equals,
+            .{ .integer = 1 },
+            .semicolon,
+            .in,
+            .{ .identifier = "a" },
+            .semicolon,
+        },
         error.Redefinition,
     );
 }
