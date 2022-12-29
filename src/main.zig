@@ -220,7 +220,12 @@ pub fn main() !void {
     var s = sema.Sema.init(gpa.allocator(), &program);
     defer s.deinit();
 
-    try s.generateRules();
+    s.generateRules() catch |e| {
+        if (s.diags.items.len == 0) return e;
+
+        try utils.printErrors(source, s.diags.items);
+        std.os.exit(1);
+    };
 
     if (opts.args.@"dump-rules") {
         var w = std.io.getStdOut().writer();
