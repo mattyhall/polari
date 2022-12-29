@@ -99,9 +99,53 @@ fn DotWriter(comptime W: anytype) type {
                         \\
                     , .{ .e_id = e_id, .child_id = child_id, .op = op });
                 },
+                .let => |let| {
+                    const equals_id = self.id();
+                    const in_id = self.id();
+                    try self.w.print(
+                        \\  e_{[e_id]} [label="let",color="white",fontcolor="white"]
+                        \\  eq_{[equals_id]} [label="[]",color="white",fontcolor="white"]
+                        \\  in_{[in_id]} [label="in",color="white",fontcolor="white"]
+                        \\  e_{[e_id]} -- eq_{[equals_id]} [color="white"]
+                        \\  e_{[e_id]} -- in_{[in_id]} [color="white"]
+                    , .{ .e_id = e_id, .equals_id = equals_id, .in_id = in_id });
+
+                    for (let.assignments) |a| {
+                        const s_id = try self.writeAssignment(&a.inner);
+                        try self.w.print(
+                            \\  eq_{[equals_id]} -- s_{[s_id]} [color="white"]
+                            \\
+                        , .{ .equals_id = equals_id, .s_id = s_id });
+                    }
+
+                    const in_e_id = try self.writeExpression(let.in.inner);
+                    try self.w.print(
+                        \\  in_{[in_id]} -- e_{[in_e_id]} [color="white"]
+                        \\
+                    , .{ .in_id = in_id, .in_e_id = in_e_id });
+                },
             }
 
             return e_id;
+        }
+
+        fn writeAssignment(self: *Self, assignment: *const parser.Assignment) anyerror!u64 {
+            const s_id = self.id();
+            const i_id = self.id();
+
+            try self.w.print(
+                \\  i_{[i_id]} [label="{[name]s}",color="white",fontcolor="white"]
+                \\
+            , .{ .i_id = i_id, .name = assignment.identifier });
+
+            const e_id = try self.writeExpression(assignment.expression.inner);
+            try self.w.print(
+                \\  s_{[s_id]} [label="=",color="white",fontcolor="white"]
+                \\  s_{[s_id]} -- i_{[i_id]} [color="white"]
+                \\  s_{[s_id]} -- e_{[e_id]} [color="white"]
+            , .{ .i_id = i_id, .s_id = s_id, .e_id = e_id });
+
+            return s_id;
         }
 
         fn write(self: *Self, program: *const parser.Program) !void {
@@ -115,21 +159,11 @@ fn DotWriter(comptime W: anytype) type {
             for (program.stmts.items) |stmt| {
                 switch (stmt.inner) {
                     .assignment => |a| {
-                        const s_id = self.id();
-                        const i_id = self.id();
-
+                        const s_id = try self.writeAssignment(&a);
                         try self.w.print(
-                            \\  i_{[i_id]} [label="{[name]s}",color="white",fontcolor="white"]
+                            \\  root -- s_{} [color="white"]
                             \\
-                        , .{ .i_id = i_id, .name = a.identifier });
-
-                        const e_id = try self.writeExpression(a.expression.inner);
-                        try self.w.print(
-                            \\  s_{[s_id]} [label="=",color="white",fontcolor="white"]
-                            \\  s_{[s_id]} -- i_{[i_id]} [color="white"]
-                            \\  s_{[s_id]} -- e_{[e_id]} [color="white"]
-                            \\  root -- s_{[s_id]} [color="white"]
-                        , .{ .i_id = i_id, .s_id = s_id, .e_id = e_id });
+                        , .{ .s_id = s_id });
                     },
                     .expression => |e| {
                         const e_id = try self.writeExpression(e);
@@ -180,6 +214,7 @@ pub fn main() !void {
     if (opts.args.@"dump-ast") {
         var w = std.io.getStdOut().writer();
         try (DotWriter(@TypeOf(w)){ .w = w }).write(&program);
+        return;
     }
 
     var s = sema.Sema.init(gpa.allocator(), &program);

@@ -66,6 +66,7 @@ pub const Compiler = struct {
                 try self.compileExpression(unaryop.e.inner);
                 try self.chunk.writeOp(.negate);
             },
+            .let => @panic("not implemented"),
         }
     }
 

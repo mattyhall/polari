@@ -30,6 +30,9 @@ pub const Tok = union(enum) {
     semicolon,
     left_paren,
     right_paren,
+
+    let,
+    in,
 };
 
 /// Loc represents a locaiton in the source code. It is in a human-readable format - i.e. line and col start at 1.
@@ -197,6 +200,8 @@ pub const Lexer = struct {
             ')' => self.tokloc(.right_paren),
             't' => try self.parseKeyword("true", .true),
             'f' => try self.parseKeyword("false", .false),
+            'l' => try self.parseKeyword("let", .let),
+            'i' => try self.parseKeyword("in", .in),
             else => {
                 if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return try self.parseIdentifier();
 
@@ -275,6 +280,7 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
+            .let, .in => continue,
             .true, .false => continue,
         }
 
@@ -332,4 +338,6 @@ test "keywords" {
     try expectLex(testing.allocator, "true f", &.{ .true, .{ .identifier = "f" } });
     try expectLex(testing.allocator, "true+f", &.{ .true, .plus, .{ .identifier = "f" } });
     try expectLex(testing.allocator, "true-f", &.{.{ .identifier = "true-f" }});
+    try expectLex(testing.allocator, "let", &.{.let});
+    try expectLex(testing.allocator, "in", &.{.in});
 }

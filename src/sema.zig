@@ -155,6 +155,7 @@ pub const Sema = struct {
                 break :b Rule{ .apply = .{ .f = .{ .builtin = op }, .arguments = args } };
             },
             .identifier => |i| Rule{ .unify = .{ .identifier = i } },
+            .let => @panic("not implemented"),
         };
 
         var gop = try self.map.getOrPutValue(

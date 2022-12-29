@@ -11,6 +11,7 @@ pub const Expression = union(enum) {
     identifier: []const u8,
     binop: struct { op: BinaryOperation, lhs: Located(*Expression), rhs: Located(*Expression) },
     unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
+    let: struct { assignments: []Located(Assignment), in: Located(*Expression) },
 
     fn eql(lhs: *const Expression, rhs: *const Expression) bool {
         if (std.meta.activeTag(lhs.*) != std.meta.activeTag(rhs.*)) return false;
@@ -28,6 +29,16 @@ pub const Expression = union(enum) {
                 if (unaryop.op != rhs.unaryop.op) return false;
 
                 return unaryop.e.inner.eql(rhs.unaryop.e.inner);
+            },
+            .let => |let| {
+                if (let.assignments.len != rhs.let.assignments.len) return false;
+
+                for (let.assignments) |expr_lhs, i| {
+                    const expr_rhs = rhs.let.assignments[i];
+                    if (!expr_lhs.inner.eql(&expr_rhs.inner)) return false;
+                }
+
+                return let.in.inner.eql(rhs.let.in.inner);
             },
         }
     }
@@ -59,6 +70,18 @@ pub const Expression = union(enum) {
                 try unaryop.e.inner.write(writer);
                 try writer.print(")", .{});
             },
+            .let => |let| {
+                try writer.writeAll("(let [");
+                for (let.assignments) |assignment| {
+                    try writer.print("{s}=", .{assignment.inner.identifier});
+                    try assignment.inner.expression.inner.write(writer);
+                    try writer.writeAll(";");
+                }
+                try writer.writeAll("] ");
+
+                try let.in.inner.write(writer);
+                try writer.writeAll(")");
+            },
         }
     }
 };
@@ -69,8 +92,20 @@ pub const BinaryOperation = enum { plus, minus, multiply, divide };
 /// UnaryOperation represents operators taking one argument, e.g. negation.
 pub const UnaryOperation = enum { negate, grouping };
 
+/// Assignment is an assignment of a variable (identifier) to an expression. Can appear at the top level or in a let..in
+/// binding.
+pub const Assignment = struct {
+    identifier: []const u8,
+    expression: Located(*Expression),
+
+    pub fn eql(lhs: *const Assignment, rhs: *const Assignment) bool {
+        if (!std.mem.eql(u8, lhs.identifier, rhs.identifier)) return false;
+        return lhs.expression.inner.eql(rhs.expression.inner);
+    }
+};
+
 pub const Statement = union(enum) {
-    assignment: struct { identifier: []const u8, expression: Located(*Expression) },
+    assignment: Assignment,
     expression: *Expression,
 };
 
@@ -195,6 +230,7 @@ pub const Parser = struct {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
             .true, .false => {},
+            .let, .in => {},
         }
 
         const tokloc = try self.pop();
@@ -219,7 +255,7 @@ pub const Parser = struct {
             .equals => b: {
                 var ass = try self.parseAssignment(lhs_tokloc);
                 try self.expect(.semicolon);
-                break :b ass;
+                break :b locate(ass.loc, Statement{ .assignment = ass.inner });
             },
             else => b: {
                 var expr = try self.parseExpressionLhs(0, lhs_tokloc);
@@ -232,7 +268,7 @@ pub const Parser = struct {
     /// parseAssignments parses an assignment.
     ///
     /// NOTE: does not parse the trailing semicolon.
-    fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Located(Statement) {
+    fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Located(Assignment) {
         try self.expect(.equals);
 
         if (lhs.tok != .identifier) {
@@ -242,7 +278,7 @@ pub const Parser = struct {
 
         var rhs = try self.parseExpression(0);
 
-        return locate(lhs.loc, Statement{ .assignment = .{ .identifier = lhs.tok.identifier, .expression = rhs } });
+        return locate(lhs.loc, Assignment{ .identifier = lhs.tok.identifier, .expression = rhs });
     }
 
     /// parseExpression parses a single expression.
@@ -251,6 +287,38 @@ pub const Parser = struct {
     fn parseExpression(self: *Parser, min_bp: u8) Error!Located(*Expression) {
         const lhs_tokloc = try self.pop();
         return try self.parseExpressionLhs(min_bp, lhs_tokloc);
+    }
+
+    /// parseLet parses a let ... in expression.
+    fn parseLet(self: *Parser, loc: Loc) Error!Located(*Expression) {
+        var al = std.ArrayListUnmanaged(Located(Assignment)){};
+        errdefer al.deinit(self.program.arena.allocator());
+
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            const first = try self.peek();
+            if (first.tok == .in) {
+                _ = try self.pop();
+                break;
+            }
+
+            var ass = try self.parseAssignment(self.pop() catch unreachable);
+            try al.append(self.program.arena.allocator(), ass);
+
+            const tokloc = try self.pop();
+            switch (tokloc.tok) {
+                .semicolon => continue,
+                else => {},
+            }
+
+            try self.allocDiag(tokloc.loc, "unexpected token: expected semicolon, got: {}", .{tokloc.tok});
+            return error.UnexpectedToken;
+        }
+
+        if (i == 0) try self.allocDiag(loc, "let must have at least one binding", .{});
+
+        var e = try self.parseExpression(0);
+        return locate(loc, try self.program.create(Expression{ .let = .{ .assignments = al.items, .in = e } }));
     }
 
     /// parseExpressionLhs parses an expression but requires the caller to pass the first token (the lhs) of the
@@ -273,6 +341,7 @@ pub const Parser = struct {
                 if (op == .grouping) try self.expect(.right_paren);
                 break :b locate(l, try self.program.create(Expression{ .unaryop = .{ .op = op, .e = e } }));
             },
+            .let => return try self.parseLet(l),
             else => |tok| {
                 try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected integer, got {}", .{tok});
                 return error.UnexpectedToken;
@@ -294,6 +363,8 @@ pub const Parser = struct {
                 .semicolon => return lhs,
 
                 .right_paren => return lhs,
+
+                .in => return lhs,
 
                 else => {
                     try self.allocDiag(
@@ -607,6 +678,88 @@ const Tests = struct {
         try expectEqualParses(
             &.{ .{ .integer = 1 }, .semicolon, .{ .integer = 2 }, .semicolon },
             &.{ .{ .expression = try e(a, .{ .integer = 1 }) }, .{ .expression = try e(a, .{ .integer = 2 }) } },
+        );
+    }
+
+    test "let..in" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParseExpr(
+            &.{
+                .let,
+                .{ .identifier = "a" },
+                .equals,
+                .{ .integer = 1 },
+                .semicolon,
+                .in,
+                .{ .identifier = "a" },
+                .semicolon,
+            },
+            .{ .let = .{
+                .assignments = &[_]Located(Assignment){
+                    locate(loc, Assignment{
+                        .identifier = "a",
+                        .expression = locate(loc, try e(a, .{ .integer = 1 })),
+                    }),
+                },
+                .in = locate(loc, try e(a, .{ .identifier = "a" })),
+            } },
+        );
+
+        try expectEqualParseExpr(
+            &.{
+                .let,
+                .{ .identifier = "a" },
+                .equals,
+                .{ .integer = 1 },
+                .semicolon,
+                .in,
+                .{ .identifier = "a" },
+                .plus,
+                .let,
+                .{ .identifier = "b" },
+                .equals,
+                .{ .integer = 2 },
+                .semicolon,
+                .in,
+                .{ .identifier = "b" },
+                .semicolon,
+            },
+            .{ .let = .{
+                .assignments = &[_]Located(Assignment){
+                    locate(loc, Assignment{
+                        .identifier = "a",
+                        .expression = locate(loc, try e(a, .{ .integer = 1 })),
+                    }),
+                },
+                .in = locate(loc, try e(a, .{ .binop = .{
+                    .op = .plus,
+                    .lhs = locate(loc, try e(a, .{ .identifier = "a" })),
+                    .rhs = locate(loc, try e(a, .{ .let = .{
+                        .assignments = &[_]Located(Assignment){
+                            locate(loc, Assignment{
+                                .identifier = "b",
+                                .expression = locate(loc, try e(a, .{ .integer = 2 })),
+                            }),
+                        },
+                        .in = locate(loc, try e(a, .{ .identifier = "b" })),
+                    } })),
+                } })),
+            } },
+        );
+    }
+
+    test "fail: let..in" {
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .let, .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .in, .{ .identifier = "a" }, .semicolon },
+        );
+
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .let, .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .{ .identifier = "a" }, .semicolon },
         );
     }
 };
