@@ -2,12 +2,8 @@
   description = "A functional programming language built in Zig";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
-    flake-compat = {
-      url = "github:edolstra/flake-compat";
-      flake = false;
-    };
     zig = {
       url = "github:mitchellh/zig-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -22,7 +18,7 @@
     };
   };
 
-  outputs = {self, nixpkgs, flake-utils, flake-compat, zig, zls, gitignore}:
+  outputs = {self, nixpkgs, flake-utils, zig, zls, gitignore}:
     flake-utils.lib.eachSystem (builtins.attrNames zig.packages) (system:
       let
         pkgs = import nixpkgs { inherit system; };
