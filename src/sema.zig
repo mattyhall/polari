@@ -4,10 +4,12 @@
 //! 1. Type T: the given expression has a known type T
 //! 2. Unify V: the given expression has the same type as V
 //! 3. Apply fn [args]: the given expression has the type of applying fn to the given args
+//! 4. Errored: the given expression cannot be typed as there is an error
 //!
 //! Once these rules are generated they are rewritten by a well-defined process:
 //! 1. Unify V => Type T when V is known to have type T
 //! 2. Apply fn [args] => Type fn(args...) when the type of everything in args is known.
+//! 3. Unify _, Apply _ _ => Errored when any of the parameters have type Errored.
 //!
 //! These are applied until no further progress is made. Type checking is successful if all the rules are now Types. If
 //! not then there is an ambiguity. During rewriting using substitution two there may also be an error if the given
@@ -57,10 +59,14 @@ const Rule = union(enum) {
     /// NOTE: Once all rules have been generated a variable being uninitialised should be an error.
     uninitialised,
 
+    /// errored signals that this variable cannot be typed as there is an error. This is fatal however we will keep
+    /// substituting rules if we get this so that we can display as many type errors as possible.
+    errored,
+
     fn deinit(self: Rule, gpa: std.mem.Allocator) void {
         switch (self) {
             .apply => |a| gpa.free(a.arguments),
-            .unify, .type, .uninitialised => {},
+            .unify, .type, .uninitialised, .errored => {},
         }
     }
 };
@@ -132,6 +138,7 @@ pub const Sema = struct {
     };
 
     const FindResult = struct { id: Id, depth: usize };
+    const Update = union(enum) { errored, t: Type };
 
     pub fn init(gpa: std.mem.Allocator, program: *const parser.Program) Sema {
         return .{ .gpa = gpa, .map = Map{}, .var_maps = .{}, .program = program };
@@ -326,6 +333,7 @@ pub const Sema = struct {
                     try writer.print(" ", .{});
                 }
             },
+            .errored => try writer.writeAll("XXX"),
             .uninitialised => try writer.writeAll("???"),
         }
     }
@@ -346,7 +354,7 @@ pub const Sema = struct {
             const r = self.map.get(variable) orelse return error.VariableNotFound;
             switch (r.inferred) {
                 .apply, .unify, .uninitialised => return false,
-                .type => {},
+                .type, .errored => {},
             }
         }
 
@@ -391,8 +399,7 @@ pub const Sema = struct {
                     return try self.checkForRecursion(loc, needle, r.inferred);
                 }
             },
-            .type => return,
-            .uninitialised => return,
+            .type, .errored, .uninitialised => return,
         }
 
         try self.allocDiag(loc, "variable cannot refer to itself", .{});
@@ -400,7 +407,7 @@ pub const Sema = struct {
     }
 
     /// solveApply solves an Apply rule - i.e. a function call.
-    fn solveApply(self: *const Sema, apply: Apply) Error!?Type {
+    fn solveApply(self: *Sema, apply: Apply) Error!?Type {
         if (!try self.allResolved(apply.arguments)) return null;
 
         switch (apply.f) {
@@ -415,7 +422,13 @@ pub const Sema = struct {
 
                     for (apply.arguments) |arg| {
                         const r = self.map.get(arg) orelse return error.VariableNotFound;
-                        if (r.inferred.type != .int) return error.TypeMismatch;
+                        if (r.inferred == .errored) return error.TypeMismatch;
+
+                        if (r.inferred.type != .int) {
+                            // FIXME: Pass a proper loc here.
+                            try self.allocDiag(arg.expr.loc, "{s} takes integer arguments, got: {}", .{ b, r.inferred.type });
+                            return error.TypeMismatch;
+                        }
                     }
                     return Type.int;
                 } else return error.VariableNotFound;
@@ -426,9 +439,17 @@ pub const Sema = struct {
 
     /// solve solves the rules in the map.
     pub fn solve(self: *Sema) !void {
-        var made_progress = true;
-        var updates = std.HashMapUnmanaged(Variable, Type, MapContext, std.hash_map.default_max_load_percentage){};
+        var err: ?Error = null;
+
+        var updates = std.HashMapUnmanaged(
+            Variable,
+            Update,
+            MapContext,
+            std.hash_map.default_max_load_percentage,
+        ){};
         defer updates.deinit(self.gpa);
+
+        var made_progress = true;
 
         var w = std.io.getStdErr().writer();
         if (self.debug) try self.printRules(w);
@@ -439,19 +460,28 @@ pub const Sema = struct {
             var it = self.map.iterator();
             while (it.next()) |entry| {
                 switch (entry.value_ptr.*.inferred) {
-                    .type => continue,
+                    .type, .errored => continue,
                     .unify => |v| {
-                        const e = self.map.get(v) orelse {
-                            return error.VariableNotFound;
-                        };
+                        const e = self.map.get(v) orelse unreachable;
                         switch (e.inferred) {
-                            .type => |t| try updates.put(self.gpa, entry.key_ptr.*, t),
+                            .type => |t| try updates.put(self.gpa, entry.key_ptr.*, .{ .t = t }),
+                            .errored => try updates.put(self.gpa, entry.key_ptr.*, .errored),
                             else => {},
                         }
                     },
                     .apply => |a| {
-                        var t = try self.solveApply(a) orelse continue;
-                        try updates.put(self.gpa, entry.key_ptr.*, t);
+                        var u: Update = b: {
+                            var t = self.solveApply(a) catch |e| {
+                                err = e;
+                                switch (e) {
+                                    error.WrongNumberOfArgs, error.TypeMismatch => break :b .errored,
+                                    else => return e,
+                                }
+                            };
+                            break :b .{ .t = t orelse continue };
+                        };
+
+                        try updates.put(self.gpa, entry.key_ptr.*, u);
                     },
                     .uninitialised => return error.Uninitialised,
                 }
@@ -466,7 +496,10 @@ pub const Sema = struct {
             while (uit.next()) |entry| {
                 var e = self.map.getEntry(entry.key_ptr.*) orelse unreachable;
                 e.value_ptr.inferred.deinit(self.gpa);
-                e.value_ptr.inferred = .{ .type = entry.value_ptr.* };
+                e.value_ptr.inferred = switch (entry.value_ptr.*) {
+                    .t => |t| .{ .type = t },
+                    .errored => .errored,
+                };
             }
 
             if (self.debug) try self.printRules(w);
@@ -482,14 +515,18 @@ pub const Sema = struct {
 
             switch (entry.value_ptr.inferred) {
                 .type => {},
+                // If we have an errored variable then we must have set err somewhere else, so skip
+                .errored => {},
                 else => {
                     try self.checkForRecursion(entry.key_ptr.expr.loc, entry.key_ptr.*, entry.value_ptr.inferred);
 
                     try self.allocDiag(entry.key_ptr.expr.loc, "could not infer type", .{});
-                    return error.CouldNotInferType;
+                    err = error.CouldNotInferType;
                 },
             }
         }
+
+        if (err) |e| return e;
     }
 
     pub fn deinit(self: *Sema) void {
