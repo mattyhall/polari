@@ -179,7 +179,8 @@ pub const Lexer = struct {
         }
 
         self.peeked = null;
-        self.index = self.index + @intCast(u32, expected.len);
+        self.index += @intCast(u32, expected.len);
+        self.loc.col += @intCast(u32, expected.len);
         return TokLoc{ .loc = loc, .tok = tok };
     }
 
