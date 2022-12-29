@@ -33,6 +33,10 @@ pub const Op = enum(u8) {
     get8,
     /// SET a: sets the local with index a to the value on the top of the stack.
     set8,
+    /// POPL: pops a single local
+    popl,
+    /// POPN n: pops n locals
+    popl_n,
 
     /// ONE: pushes 1 onto the stack.
     one,
@@ -65,6 +69,8 @@ pub const Op = enum(u8) {
             .const8 => .{ .op = "CONST", .rest = " c" },
             .get8 => .{ .op = "GET", .rest = " l" },
             .set8 => .{ .op = "SET", .rest = " l" },
+            .popl => .{ .op = "POPL", .rest = "" },
+            .popl_n => .{ .op = "POPLN", .rest = "  " },
             .one => .{ .op = "ONE", .rest = "" },
             .neg_one => .{ .op = "NONE", .rest = "" },
             .true => .{ .op = "TRUE", .rest = "" },
@@ -134,10 +140,18 @@ pub const Chunk = struct {
         return @intCast(u32, self.locals.items.len - 1);
     }
 
+    pub fn popLocals(self: *Chunk, n: u32) void {
+        self.locals.shrinkRetainingCapacity(self.locals.items.len - n);
+    }
+
     /// getLocal returns the local with name, if it exists.
     pub fn getLocal(self: *Chunk, name: []const u8) ?u32 {
-        for (self.locals.items) |l, i| {
+        var i = self.locals.items.len - 1;
+        while (true) : (i -= 1) {
+            const l = self.locals.items[i];
             if (std.mem.eql(u8, l.name, name)) return @intCast(u32, i);
+
+            if (i == 0) break;
         }
 
         return null;
@@ -195,12 +209,15 @@ pub const Chunk = struct {
                 break :b @intCast(usize, arg);
             },
         };
-        try writer.print("{x:<4} ; ", .{arg});
+        try writer.print("{x:<4} ", .{arg});
 
         // TODO: check that there are at least arg items.
         switch (op) {
-            .const16, .const32 => try self.constants.items[arg].print(writer),
-            .get16, .set16, .get32, .set32 => try self.locals.items[arg].print(writer),
+            .const16, .const32 => {
+                try writer.writeAll("; ");
+                try self.constants.items[arg].print(writer);
+            },
+            else => {},
         }
     }
 
@@ -210,19 +227,20 @@ pub const Chunk = struct {
         while (i < self.code.items.len) : (i += 1) {
             const op = try std.meta.intToEnum(Op, self.code.items[i]);
             switch (op) {
-                .const8, .get8, .set8 => {
+                .const8 => {
                     const arg = try self.next(&i);
                     try op.print(writer);
                     try writer.print("{x:<4} ; ", .{arg});
 
-                    // TODO: check that there are at least arg items.
-                    switch (op) {
-                        .const8 => try self.constants.items[arg].print(writer),
-                        .get8, .set8 => try self.locals.items[arg].print(writer),
-                        else => unreachable,
-                    }
+                    try self.constants.items[arg].print(writer);
+                },
+                .popl_n, .get8, .set8 => {
+                    const arg = try self.next(&i);
+                    try op.print(writer);
+                    try writer.print("{x:<4}", .{arg});
                 },
                 .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide, .negate => try op.print(writer),
+                .popl => try op.print(writer),
                 .rare => {
                     i += 1;
                     try self.disassembleRare(&i, writer);
@@ -270,14 +288,19 @@ test "disassemble" {
     try chunk.writeOp(.neg_one);
     try chunk.writeOp(.set8);
     try chunk.writeU8(1);
+    try chunk.writeOp(.popl);
+    try chunk.writeOp(.popl_n);
+    try chunk.writeU8(5);
 
     try testDissassemble(&chunk,
         \\CONST  c0    ; 147
-        \\GET    l0    ; foo
-        \\GET    l0    ; foo
+        \\GET    l0   
+        \\GET    l0    
         \\ONE   
         \\NONE  
-        \\SET    l1    ; bar
+        \\SET    l1   
+        \\POPL  
+        \\POPLN   5   
         \\
     );
 }

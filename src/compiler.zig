@@ -66,7 +66,28 @@ pub const Compiler = struct {
                 try self.compileExpression(unaryop.e.inner);
                 try self.chunk.writeOp(.negate);
             },
-            .let => @panic("not implemented"),
+            .let => |let| {
+                for (let.assignments) |a| {
+                    try self.compileExpression(a.inner.expression.inner);
+                    const l = try self.chunk.addLocal(a.inner.identifier);
+                    try self.writeLocal(.set, l);
+                }
+
+                try self.compileExpression(let.in.inner);
+
+                if (let.assignments.len == 1) {
+                    self.chunk.popLocals(1);
+                    try self.chunk.writeOp(.popl);
+                    return;
+                }
+
+                var locals = @intCast(isize, let.assignments.len);
+                self.chunk.popLocals(@intCast(u32, locals));
+                while (locals > 0) : (locals -= std.math.maxInt(u8)) {
+                    try self.chunk.writeOp(.popl_n);
+                    try self.chunk.writeU8(@intCast(u8, std.math.max(std.math.maxInt(u8), locals)));
+                }
+            },
         }
     }
 
@@ -75,8 +96,8 @@ pub const Compiler = struct {
             switch (stmt.inner) {
                 .expression => |e| try self.compileExpression(e),
                 .assignment => |a| {
-                    const l = try self.chunk.addLocal(a.identifier);
                     try self.compileExpression(a.expression.inner);
+                    const l = try self.chunk.addLocal(a.identifier);
                     try self.writeLocal(.set, l);
                 },
             }
@@ -125,7 +146,7 @@ test "constants" {
 
     try testCompile("a = true;",
         \\TRUE  
-        \\SET    l0    ; a
+        \\SET    l0   
         \\
     );
 }
@@ -139,6 +160,31 @@ test "maths" {
         \\CONST  c3    ; 3
         \\DIV   
         \\ADD   
+        \\
+    );
+}
+
+test "let..in" {
+    try testCompile("let a = 1; in a + 2;",
+        \\ONE   
+        \\SET    l0   
+        \\GET    l0   
+        \\CONST  c0    ; 2
+        \\ADD   
+        \\POPL  
+        \\
+    );
+
+    try testCompile("a = 5; b = let a = 1; in a + 2;",
+        \\CONST  c0    ; 5
+        \\SET    l0   
+        \\ONE   
+        \\SET    l1   
+        \\GET    l1   
+        \\CONST  c1    ; 2
+        \\ADD   
+        \\POPL  
+        \\SET    l1   
         \\
     );
 }

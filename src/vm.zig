@@ -76,6 +76,13 @@ pub const Vm = struct {
                     try self.locals.resize(self.gpa, i + 1);
                     self.locals.items[i] = self.stack.pop();
                 },
+                .popl => _ = self.locals.pop(),
+                .popl_n => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
+                    const i = self.chunk.code.items[self.pc];
+                    self.pc += 1;
+                    self.locals.shrinkRetainingCapacity(self.locals.items.len - i);
+                },
                 .one => try self.stack.append(self.gpa, .{ .integer = 1 }),
                 .neg_one => try self.stack.append(self.gpa, .{ .integer = -1 }),
                 .true => try self.stack.append(self.gpa, .{ .boolean = true }),
@@ -99,13 +106,14 @@ pub const Vm = struct {
 
 const testing = std.testing;
 
-fn testExpectStack(chunk: bc.Chunk, expected: []const bc.Value) !void {
+fn testExpectStack(chunk: bc.Chunk, expected: []const bc.Value, locals: usize) !void {
     var vm = Vm.init(testing.allocator, chunk);
     defer vm.deinit();
 
     try vm.run();
 
     try testing.expectEqualSlices(bc.Value, expected, vm.stack.items);
+    try testing.expectEqual(vm.locals.items.len, locals);
 }
 
 test "constants" {
@@ -119,7 +127,7 @@ test "constants" {
     try chunk.writeOp(.const8);
     try chunk.writeU8(1);
 
-    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } });
+    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } }, 0);
 }
 
 test "locals" {
@@ -139,7 +147,7 @@ test "locals" {
     try chunk.writeOp(.get8);
     try chunk.writeU8(1);
 
-    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } });
+    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } }, 2);
 }
 
 test "maths" {
@@ -157,7 +165,32 @@ test "maths" {
     try chunk.writeOp(.subtract); // 2 - 3
     try chunk.writeOp(.negate); // *-1;
 
-    try testExpectStack(chunk, &.{
-        .{ .integer = 1 },
-    });
+    try testExpectStack(chunk, &.{.{ .integer = 1 }}, 0);
+}
+
+test "scopes" {
+    var chunk = bc.Chunk.init(testing.allocator);
+    defer chunk.deinit();
+
+    {
+        var i: usize = 0;
+        while (i < 5) : (i += 1) {
+            const c = try chunk.addConstant(.{ .integer = @intCast(i64, i) });
+            try chunk.writeOp(.const8);
+            try chunk.writeU8(@intCast(u8, c));
+            try chunk.writeOp(.set8);
+            try chunk.writeU8(@intCast(u8, i));
+        }
+    }
+
+    try chunk.writeOp(.popl);
+    try chunk.writeOp(.popl_n);
+    try chunk.writeU8(2);
+
+    try chunk.writeOp(.get8);
+    try chunk.writeU8(0);
+    try chunk.writeOp(.get8);
+    try chunk.writeU8(1);
+
+    try testExpectStack(chunk, &.{ .{ .integer = 0 }, .{ .integer = 1 } }, 2);
 }
