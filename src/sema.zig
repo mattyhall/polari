@@ -121,7 +121,17 @@ pub const Sema = struct {
     diags: std.ArrayListUnmanaged(lexer.Diag) = std.ArrayListUnmanaged(lexer.Diag){},
     debug: bool = false,
 
-    const Error = error{ OutOfMemory, VariableNotFound, CouldNotInferType, TypeMismatch, WrongNumberOfArgs, Recursion };
+    const Error = error{
+        OutOfMemory,
+        VariableNotFound,
+        CouldNotInferType,
+        TypeMismatch,
+        WrongNumberOfArgs,
+        Recursion,
+        Redefinition,
+    };
+
+    const FindResult = struct { id: Id, depth: usize };
 
     pub fn init(gpa: std.mem.Allocator, program: *const parser.Program) Sema {
         return .{ .gpa = gpa, .map = Map{}, .var_maps = .{}, .program = program };
@@ -181,7 +191,7 @@ pub const Sema = struct {
 
                 break :b Rule{ .apply = .{ .f = .{ .builtin = op }, .arguments = args } };
             },
-            .identifier => |i| Rule{ .unify = .{ .identifier = (try self.findId(expr.loc, i)).id } },
+            .identifier => |i| Rule{ .unify = .{ .identifier = (try self.findId(expr.loc, i, true)).id } },
             .let => @panic("not implemented"),
         };
 
@@ -194,12 +204,12 @@ pub const Sema = struct {
     }
 
     /// findId finds the deepest identifier id with the name identifier.
-    fn findId(self: *Sema, loc: lexer.Loc, identifier: []const u8) Error!struct { id: Id, depth: usize } {
+    fn findId(self: *Sema, loc: lexer.Loc, identifier: []const u8, diag: bool) Error!FindResult {
         var i: usize = self.var_maps.items.len - 1;
         while (true) : (i -= 1) {
             const id = self.var_maps.items[i].get(identifier) orelse {
                 if (i == 0) {
-                    try self.allocDiag(loc, "undeclared variable {s}", .{identifier});
+                    if (diag) try self.allocDiag(loc, "undeclared variable {s}", .{identifier});
                     return error.VariableNotFound;
                 }
 
@@ -217,6 +227,15 @@ pub const Sema = struct {
         for (self.program.stmts.items) |stmt| {
             switch (stmt.inner) {
                 .assignment => |a| {
+                    var res: ?FindResult = self.findId(.{}, a.identifier, false) catch |e| switch (e) {
+                        error.VariableNotFound => null,
+                        else => return e,
+                    };
+                    if (res != null) {
+                        try self.allocDiag(stmt.loc, "redefinition of variable {s}", .{a.identifier});
+                        return error.Redefinition;
+                    }
+
                     var id = self.getId();
                     try self.currentVarMap().put(self.gpa, a.identifier, id);
                     try self.map.put(self.gpa, .{ .identifier = id }, .{ .signature = null, .inferred = .uninitialised });
@@ -230,7 +249,7 @@ pub const Sema = struct {
                 .assignment => |a| {
                     try self.generateRulesForExpression(a.expression);
 
-                    const id = try self.findId(stmt.loc, a.identifier);
+                    const id = try self.findId(stmt.loc, a.identifier, true);
                     const gop = try self.map.getOrPutValue(
                         self.gpa,
                         .{ .identifier = id.id },
@@ -403,9 +422,7 @@ pub const Sema = struct {
                         var t = try self.solveApply(a) orelse continue;
                         try updates.put(self.gpa, entry.key_ptr.*, t);
                     },
-                    .uninitialised => {
-                        return error.Uninitialised;
-                    },
+                    .uninitialised => return error.Uninitialised,
                 }
             }
 
@@ -500,7 +517,12 @@ fn expectTypeCheckError(toks: []const lexer.Tok, expected: anyerror) !void {
     var sema = Sema.init(testing.allocator, &program);
     defer sema.deinit();
 
-    try sema.generateRules();
+    const err = sema.generateRules();
+    err catch {
+        try testing.expectError(expected, err);
+        return;
+    };
+
     try testing.expectError(expected, sema.solve());
 }
 
@@ -563,4 +585,11 @@ test "fail: maths" {
         .true,
         .semicolon,
     }, error.TypeMismatch);
+}
+
+test "fail: assignment" {
+    try expectTypeCheckError(
+        &.{ .{ .identifier = "a" }, .equals, .true, .semicolon, .{ .identifier = "a" }, .equals, .true, .semicolon },
+        error.Redefinition,
+    );
 }
