@@ -212,6 +212,7 @@ pub const Sema = struct {
                 // The type of a let is the type of it's in clause, so unify.
                 break :b Rule{ .unify = .{ .expr = .{ .loc = let.in.loc, .inner = let.in.inner } } };
             },
+            .function => @panic("unimplemented"),
         };
 
         var gop = try self.map.getOrPutValue(

@@ -5,6 +5,8 @@ const TokLoc = lexer.TokLoc;
 const Loc = lexer.Loc;
 const Diag = lexer.Diag;
 
+pub const Parameter = union(enum) { identifier: []const u8 };
+
 pub const Expression = union(enum) {
     integer: i64,
     boolean: bool,
@@ -12,6 +14,7 @@ pub const Expression = union(enum) {
     binop: struct { op: BinaryOperation, lhs: Located(*Expression), rhs: Located(*Expression) },
     unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
     let: struct { assignments: []Located(Assignment), in: Located(*Expression) },
+    function: struct { params: []Located(Parameter), body: Located(*Expression) },
 
     fn eql(lhs: *const Expression, rhs: *const Expression) bool {
         if (std.meta.activeTag(lhs.*) != std.meta.activeTag(rhs.*)) return false;
@@ -39,6 +42,21 @@ pub const Expression = union(enum) {
                 }
 
                 return let.in.inner.eql(rhs.let.in.inner);
+            },
+            .function => |f| {
+                const rhs_f = rhs.function;
+                if (f.params.len != rhs.function.params.len) return false;
+
+                for (f.params) |param, i| {
+                    if (std.meta.activeTag(param.inner) != std.meta.activeTag(rhs_f.params[i].inner)) return false;
+
+                    switch (param.inner) {
+                        .identifier => |ident| if (!std.mem.eql(u8, rhs_f.params[i].inner.identifier, ident))
+                            return false,
+                    }
+                }
+
+                return f.body.inner.eql(rhs_f.body.inner);
             },
         }
     }
@@ -80,6 +98,20 @@ pub const Expression = union(enum) {
                 try writer.writeAll("] ");
 
                 try let.in.inner.write(writer);
+                try writer.writeAll(")");
+            },
+            .function => |f| {
+                try writer.writeAll("(fn [");
+                for (f.params) |param, i| {
+                    switch (param.inner) {
+                        .identifier => |ident| try writer.writeAll(ident),
+                    }
+
+                    if (i != f.params.len - 1) try writer.writeAll(" ");
+                }
+                try writer.writeAll("] ");
+
+                try f.body.inner.write(writer);
                 try writer.writeAll(")");
             },
         }
@@ -230,7 +262,7 @@ pub const Parser = struct {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
             .true, .false => {},
-            .let, .in => {},
+            .let, .in, .@"fn", .fat_arrow => {},
         }
 
         const tokloc = try self.pop();
@@ -315,10 +347,49 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
 
-        if (i == 0) try self.allocDiag(loc, "let must have at least one binding", .{});
+        if (i == 0) {
+            try self.allocDiag(loc, "let must have at least one binding", .{});
+            return error.UnexpectedToken;
+        }
 
         var e = try self.parseExpression(0);
         return locate(loc, try self.program.create(Expression{ .let = .{ .assignments = al.items, .in = e } }));
+    }
+
+    /// parseFn parses a function.
+    fn parseFn(self: *Parser, loc: Loc) Error!Located(*Expression) {
+        var al = std.ArrayListUnmanaged(Located(Parameter)){};
+        errdefer al.deinit(self.program.arena.allocator());
+
+        var i: usize = 0;
+        while (true) : (i += 1) {
+            const tokloc = try self.pop();
+            switch (tokloc.tok) {
+                .identifier => {},
+                .fat_arrow => break,
+                else => {
+                    try self.allocDiag(
+                        tokloc.loc,
+                        "unexpected token: expected an identifier, got: {}",
+                        .{tokloc.tok},
+                    );
+                    return error.UnexpectedToken;
+                },
+            }
+
+            try al.append(self.program.arena.allocator(), .{
+                .loc = tokloc.loc,
+                .inner = .{ .identifier = tokloc.tok.identifier },
+            });
+        }
+
+        if (i == 0) {
+            try self.allocDiag(loc, "fn must have at least one parameter", .{});
+            return error.UnexpectedToken;
+        }
+
+        var e = try self.parseExpression(0);
+        return locate(loc, try self.program.create(Expression{ .function = .{ .params = al.items, .body = e } }));
     }
 
     /// parseExpressionLhs parses an expression but requires the caller to pass the first token (the lhs) of the
@@ -342,8 +413,9 @@ pub const Parser = struct {
                 break :b locate(l, try self.program.create(Expression{ .unaryop = .{ .op = op, .e = e } }));
             },
             .let => return try self.parseLet(l),
+            .@"fn" => return try self.parseFn(l),
             else => |tok| {
-                try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected integer, got {}", .{tok});
+                try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected expression, got {}", .{tok});
                 return error.UnexpectedToken;
             },
         };
@@ -760,6 +832,39 @@ const Tests = struct {
         try expectFailParse(
             error.UnexpectedToken,
             &.{ .let, .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .{ .identifier = "a" }, .semicolon },
+        );
+    }
+
+    test "functions" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParseExpr(
+            &.{
+                .@"fn",
+                .{ .identifier = "a" },
+                .fat_arrow,
+                .{ .identifier = "a" },
+                .plus,
+                .{ .integer = 1 },
+                .semicolon,
+            },
+            .{ .function = .{
+                .params = &[_]Located(Parameter){locate(loc, Parameter{ .identifier = "a" })},
+                .body = locate(loc, try e(a, .{ .binop = .{
+                    .op = .plus,
+                    .lhs = locate(loc, try e(a, .{ .identifier = "a" })),
+                    .rhs = locate(loc, try e(a, .{ .integer = 1 })),
+                } })),
+            } },
+        );
+    }
+
+    test "fail: functions" {
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .@"fn", .{ .identifier = "a" }, .fat_arrow, .semicolon },
         );
     }
 };

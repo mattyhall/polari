@@ -33,6 +33,8 @@ pub const Tok = union(enum) {
 
     let,
     in,
+    @"fn",
+    fat_arrow,
 };
 
 /// Loc represents a locaiton in the source code. It is in a human-readable format - i.e. line and col start at 1.
@@ -191,7 +193,18 @@ pub const Lexer = struct {
         const c = self.peek() catch return null;
 
         return switch (c) {
-            '=' => self.tokloc(.equals),
+            '=' => {
+                const loc = self.loc;
+                _ = self.pop() catch unreachable;
+                const c2 = self.peek() catch return .{ .tok = .equals, .loc = loc };
+                return switch (c2) {
+                    '>' => b: {
+                        _ = self.pop() catch unreachable;
+                        break :b .{ .tok = .fat_arrow, .loc = loc };
+                    },
+                    else => .{ .tok = .equals, .loc = loc },
+                };
+            },
             '+' => self.tokloc(.plus),
             '-' => self.tokloc(.minus),
             '/' => self.tokloc(.forward_slash),
@@ -200,7 +213,15 @@ pub const Lexer = struct {
             '(' => self.tokloc(.left_paren),
             ')' => self.tokloc(.right_paren),
             't' => try self.parseKeyword("true", .true),
-            'f' => try self.parseKeyword("false", .false),
+            'f' => {
+                if (self.index + 1 >= self.source.len) return try self.parseIdentifier();
+
+                return switch (self.source[self.index + 1]) {
+                    'a' => try self.parseKeyword("false", .false),
+                    'n' => try self.parseKeyword("fn", .@"fn"),
+                    else => try self.parseIdentifier(),
+                };
+            },
             'l' => try self.parseKeyword("let", .let),
             'i' => try self.parseKeyword("in", .in),
             else => {
@@ -281,7 +302,7 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
-            .let, .in => continue,
+            .let, .in, .@"fn", .fat_arrow => continue,
             .true, .false => continue,
         }
 
@@ -334,6 +355,7 @@ test "fail: random chars" {
 test "keywords" {
     try expectLex(testing.allocator, "true", &.{.true});
     try expectLex(testing.allocator, "false", &.{.false});
+    try expectLex(testing.allocator, "fn", &.{.@"fn"});
     try expectLex(testing.allocator, "truf", &.{.{ .identifier = "truf" }});
     try expectLex(testing.allocator, "truef", &.{.{ .identifier = "truef" }});
     try expectLex(testing.allocator, "true f", &.{ .true, .{ .identifier = "f" } });

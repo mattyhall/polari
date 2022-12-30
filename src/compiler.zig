@@ -88,6 +88,7 @@ pub const Compiler = struct {
                     try self.chunk.writeU8(@intCast(u8, std.math.max(std.math.maxInt(u8), locals)));
                 }
             },
+            .function => @panic("not implemented"),
         }
     }
 

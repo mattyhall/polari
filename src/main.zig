@@ -124,6 +124,37 @@ fn DotWriter(comptime W: anytype) type {
                         \\
                     , .{ .in_id = in_id, .in_e_id = in_e_id });
                 },
+                .function => |f| {
+                    const params_id = self.id();
+                    const arrow_id = self.id();
+                    try self.w.print(
+                        \\  e_{[e_id]} [label="fn",color="white",fontcolor="white"]
+                        \\  params_{[params_id]} [label="params",color="white",fontcolor="white"]
+                        \\  arrow_{[arrow_id]} [label="=>",color="white",fontcolor="white"]
+                        \\  e_{[e_id]} -- params_{[params_id]} [color="white"]
+                        \\  e_{[e_id]} -- arrow_{[arrow_id]} [color="white"]
+                        \\
+                    , .{ .params_id = params_id, .arrow_id = arrow_id, .e_id = e_id });
+
+                    for (f.params) |param| {
+                        const param_id = self.id();
+                        switch (param.inner) {
+                            .identifier => |ident| {
+                                try self.w.print(
+                                    \\  param_{[param_id]} [label="{[ident]s}",color="white",fontcolor="white"]
+                                    \\  params_{[params_id]} -- param_{[param_id]} [color="white"]
+                                    \\
+                                , .{ .param_id = param_id, .params_id = params_id, .ident = ident });
+                            },
+                        }
+                    }
+
+                    const body_e_id = try self.writeExpression(f.body.inner);
+                    try self.w.print(
+                        \\  arrow_{[arrow_id]} -- e_{[body_e_id]} [color="white"]
+                        \\
+                    , .{ .arrow_id = arrow_id, .body_e_id = body_e_id });
+                },
             }
 
             return e_id;
