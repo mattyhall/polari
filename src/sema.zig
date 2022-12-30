@@ -219,6 +219,12 @@ pub const Sema = struct {
     locations: LocMap,
     diags: std.ArrayListUnmanaged(Diag),
 
+    const plusId = 0;
+    const subId = 1;
+    const multId = 2;
+    const divId = 3;
+    const negateId = 4;
+
     pub fn init(gpa: std.mem.Allocator, debug: bool) Sema {
         return .{
             .gpa = gpa,
@@ -324,6 +330,19 @@ pub const Sema = struct {
         }
     }
 
+    fn generateRulesForApply(self: *Sema, f: Variable, args: []const Variable, expr: Variable) !void {
+        try self.unifications.ensureUnusedCapacity(self.gpa, 1 + args.len);
+
+        self.unifications.appendAssumeCapacity(.{ .lhs = expr, .rhs = .{ .ret = f } });
+
+        for (args) |arg, i| {
+            self.unifications.appendAssumeCapacity(.{
+                .lhs = arg,
+                .rhs = .{ .parameter = .{ .param = @intCast(u32, i), .f = f } },
+            });
+        }
+    }
+
     /// generateRulesForExpression generates unifications for the given expression.
     fn generateRulesForExpression(self: *Sema, loc: Loc, expr: *const Expression) !void {
         const v = Variable{ .expr = expr };
@@ -335,7 +354,7 @@ pub const Sema = struct {
                 return;
             },
             .boolean => {
-                try self.types.put(self.gpa, v, .int);
+                try self.types.put(self.gpa, v, .bool);
                 return;
             },
             else => try self.types.put(self.gpa, v, .unknown),
@@ -354,8 +373,39 @@ pub const Sema = struct {
                     .rhs = .{ .variable = .{ .id = ident_id } },
                 });
             },
-            .binop => unreachable,
-            .unaryop => unreachable,
+            .unaryop => |unaryop| {
+                try self.generateRulesForExpression(unaryop.e.loc, unaryop.e.inner);
+
+                switch (unaryop.op) {
+                    .grouping => try self.unifications.append(
+                        self.gpa,
+                        .{ .lhs = v, .rhs = .{ .variable = .{ .expr = unaryop.e.inner } } },
+                    ),
+                    .negate => try self.generateRulesForApply(
+                        .{ .id = negateId },
+                        &[_]Variable{.{ .expr = unaryop.e.inner }},
+                        v,
+                    ),
+                }
+            },
+            .binop => |binop| {
+                try self.generateRulesForExpression(binop.lhs.loc, binop.lhs.inner);
+                try self.generateRulesForExpression(binop.rhs.loc, binop.rhs.inner);
+
+                var op_id: Id = switch (binop.op) {
+                    .plus => plusId,
+                    .minus => subId,
+                    .multiply => multId,
+                    .divide => divId,
+                    .apply => @panic("not implemented"),
+                };
+
+                try self.generateRulesForApply(
+                    .{ .id = op_id },
+                    &[_]Variable{ .{ .expr = binop.lhs.inner }, .{ .expr = binop.rhs.inner } },
+                    v,
+                );
+            },
             .let => unreachable,
             .function => unreachable,
             .apply => unreachable,
@@ -424,7 +474,7 @@ pub const Sema = struct {
 
         if (!e.value_ptr.eql(t)) {
             const loc = self.locations.get(v) orelse Loc{};
-            try self.allocDiag(loc, "type mismatch: expected {}, got {}", .{ e.value_ptr.*, t });
+            try self.allocDiag(loc, "type mismatch: expected {}, got {}", .{ t, e.value_ptr.* });
             return error.TypeMismatch;
         }
 
@@ -452,12 +502,47 @@ pub const Sema = struct {
                             .unknown => continue,
                             else => {
                                 try self.setType(unif.lhs, t);
-                                _ = self.unifications.swapRemove(i - 1);
                                 i -= 1;
+                                _ = self.unifications.swapRemove(i);
                             },
                         }
                     },
-                    else => @panic("not implemented"),
+                    .parameter => |p| {
+                        const t = switch (self.types.get(p.f) orelse unreachable) {
+                            .unknown => continue,
+                            .function => |f| f,
+                            else => |t| {
+                                const loc = self.locations.get(unif.lhs) orelse Loc{};
+                                try self.allocDiag(loc, "expected function, got: {}", .{t});
+                                return error.TypeMistmatch;
+                            },
+                        };
+
+                        if (p.param >= t.params.len) {
+                            const loc = self.locations.get(unif.lhs) orelse Loc{};
+                            try self.allocDiag(loc, "too many arguments to function", .{});
+                            return error.TypeMistmatch;
+                        }
+
+                        try self.setType(unif.lhs, t.params[p.param]);
+                        i -= 1;
+                        _ = self.unifications.swapRemove(i);
+                    },
+                    .ret => |r| {
+                        const t = switch (self.types.get(r) orelse unreachable) {
+                            .unknown => continue,
+                            .function => |f| f,
+                            else => |t| {
+                                const loc = self.locations.get(unif.lhs) orelse Loc{};
+                                try self.allocDiag(loc, "expected function, got: {}", .{t});
+                                return error.TypeMistmatch;
+                            },
+                        };
+
+                        try self.setType(unif.lhs, t.ret.*);
+                        i -= 1;
+                        _ = self.unifications.swapRemove(i);
+                    },
                 }
             }
         }
@@ -544,14 +629,14 @@ fn expectTypeCheckFail(source: []const u8, err: anyerror) !void {
     try sema.prepopulate();
 
     var e = sema.generateRules(&program);
-    err catch {
+    e catch {
         try testing.expectError(err, e);
         return;
     };
 
-    e = sema.solve();
-    e catch {
-        try testing.expectError(err, e);
+    var e2 = sema.solve();
+    e2 catch {
+        try testing.expectError(err, e2);
         return;
     };
 
@@ -569,4 +654,19 @@ test "assignments" {
 test "fail: assignments" {
     try expectTypeCheckFail("a=b;", error.CouldNotFindVariable);
     try expectTypeCheckFail("a=1;a=true;", error.Redefinition);
+}
+
+test "maths" {
+    try expectTypesEqual("a=1+1;b=2-1;c=1*1;d=2/1;e=-1;", &.{
+        .{ .id = "a", .t = .int },
+        .{ .id = "b", .t = .int },
+        .{ .id = "c", .t = .int },
+        .{ .id = "d", .t = .int },
+        .{ .id = "e", .t = .int },
+    });
+}
+
+test "fail: maths" {
+    try expectTypeCheckFail("a=-true;", error.TypeMismatch);
+    try expectTypeCheckFail("a=1+true;", error.TypeMismatch);
 }
