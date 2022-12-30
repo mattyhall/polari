@@ -481,6 +481,64 @@ pub const Sema = struct {
         self.made_progress = true;
     }
 
+    pub fn solveIter(self: *Sema) !void {
+        var i: usize = 0;
+        while (i < self.unifications.items.len) {
+            const unif = self.unifications.items[i];
+            i += 1;
+
+            switch (unif.rhs) {
+                .variable => |v| {
+                    const t = self.types.get(v) orelse unreachable;
+                    switch (t) {
+                        .unknown => continue,
+                        else => {
+                            try self.setType(unif.lhs, t);
+                            i -= 1;
+                            _ = self.unifications.swapRemove(i);
+                        },
+                    }
+                },
+                .parameter => |p| {
+                    const t = switch (self.types.get(p.f) orelse unreachable) {
+                        .unknown => continue,
+                        .function => |f| f,
+                        else => |t| {
+                            const loc = self.locations.get(unif.lhs) orelse Loc{};
+                            try self.allocDiag(loc, "expected function, got: {}", .{t});
+                            return error.TypeMistmatch;
+                        },
+                    };
+
+                    if (p.param >= t.params.len) {
+                        const loc = self.locations.get(unif.lhs) orelse Loc{};
+                        try self.allocDiag(loc, "too many arguments to function", .{});
+                        return error.TypeMistmatch;
+                    }
+
+                    try self.setType(unif.lhs, t.params[p.param]);
+                    i -= 1;
+                    _ = self.unifications.swapRemove(i);
+                },
+                .ret => |r| {
+                    const t = switch (self.types.get(r) orelse unreachable) {
+                        .unknown => continue,
+                        .function => |f| f,
+                        else => |t| {
+                            const loc = self.locations.get(unif.lhs) orelse Loc{};
+                            try self.allocDiag(loc, "expected function, got: {}", .{t});
+                            return error.TypeMistmatch;
+                        },
+                    };
+
+                    try self.setType(unif.lhs, t.ret.*);
+                    i -= 1;
+                    _ = self.unifications.swapRemove(i);
+                },
+            }
+        }
+    }
+
     /// solve tries to find the type of all expressions.
     pub fn solve(self: *Sema) !void {
         var w = std.io.getStdOut().writer();
@@ -489,62 +547,7 @@ pub const Sema = struct {
             if (self.debug) try self.writeState(w);
 
             self.made_progress = false;
-
-            var i: usize = 0;
-            while (i < self.unifications.items.len) {
-                const unif = self.unifications.items[i];
-                i += 1;
-
-                switch (unif.rhs) {
-                    .variable => |v| {
-                        const t = self.types.get(v) orelse unreachable;
-                        switch (t) {
-                            .unknown => continue,
-                            else => {
-                                try self.setType(unif.lhs, t);
-                                i -= 1;
-                                _ = self.unifications.swapRemove(i);
-                            },
-                        }
-                    },
-                    .parameter => |p| {
-                        const t = switch (self.types.get(p.f) orelse unreachable) {
-                            .unknown => continue,
-                            .function => |f| f,
-                            else => |t| {
-                                const loc = self.locations.get(unif.lhs) orelse Loc{};
-                                try self.allocDiag(loc, "expected function, got: {}", .{t});
-                                return error.TypeMistmatch;
-                            },
-                        };
-
-                        if (p.param >= t.params.len) {
-                            const loc = self.locations.get(unif.lhs) orelse Loc{};
-                            try self.allocDiag(loc, "too many arguments to function", .{});
-                            return error.TypeMistmatch;
-                        }
-
-                        try self.setType(unif.lhs, t.params[p.param]);
-                        i -= 1;
-                        _ = self.unifications.swapRemove(i);
-                    },
-                    .ret => |r| {
-                        const t = switch (self.types.get(r) orelse unreachable) {
-                            .unknown => continue,
-                            .function => |f| f,
-                            else => |t| {
-                                const loc = self.locations.get(unif.lhs) orelse Loc{};
-                                try self.allocDiag(loc, "expected function, got: {}", .{t});
-                                return error.TypeMistmatch;
-                            },
-                        };
-
-                        try self.setType(unif.lhs, t.ret.*);
-                        i -= 1;
-                        _ = self.unifications.swapRemove(i);
-                    },
-                }
-            }
+            try self.solveIter();
         }
 
         if (self.debug) try self.writeState(w);
