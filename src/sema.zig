@@ -113,6 +113,89 @@ const Map = std.HashMapUnmanaged(
 /// VarMap maps identifier names to their identifier id.
 const VarMap = std.StringHashMapUnmanaged(Id);
 
+/// normaliseApply takes the lhs and rhs of an apply binop and recurses down its lhs to find the function being called.
+/// It adds any arguments of that function to args, and returns the function.
+///
+/// Example (in pseudocode):
+///   f = normaliseApply(Apply (Apply f 10) 20, 30, args)
+///     f = normaliseApply(Apply f 10, 20, args)
+///       args.push(10)
+///       return f
+///     args.push(20)
+///     return f
+///   args.push(30)
+///   return f
+/// => args = [10, 20, 30], ret value = f
+fn normaliseApply(
+    arena: std.mem.Allocator,
+    lhs: Located(*parser.Expression),
+    rhs: Located(*parser.Expression),
+    args: *std.ArrayList(Located(*parser.Expression)),
+) !Located(*parser.Expression) {
+    var f = b: {
+        switch (lhs.inner.*) {
+            .binop => |binop| {
+                switch (binop.op) {
+                    .apply => break :b try normaliseApply(arena, binop.lhs, binop.rhs, args),
+                    else => {},
+                }
+            },
+            else => {},
+        }
+
+        try normaliseExpression(arena, lhs.inner);
+        break :b lhs;
+    };
+
+    try normaliseExpression(arena, rhs.inner);
+    try args.append(rhs);
+
+    return f;
+}
+
+/// normaliseExpression collapses apply binop chains into a single apply expression.
+fn normaliseExpression(arena: std.mem.Allocator, expr: *parser.Expression) error{OutOfMemory}!void {
+    switch (expr.*) {
+        .binop => |binop| {
+            switch (binop.op) {
+                .apply => {
+                    var al = std.ArrayList(Located(*parser.Expression)).init(arena);
+                    errdefer al.deinit();
+
+                    var f = try normaliseApply(arena, binop.lhs, binop.rhs, &al);
+                    expr.* = .{ .apply = .{ .f = f, .args = try al.toOwnedSlice() } };
+                },
+                else => {
+                    try normaliseExpression(arena, binop.lhs.inner);
+                    try normaliseExpression(arena, binop.rhs.inner);
+                },
+            }
+        },
+        .unaryop => |unaryop| try normaliseExpression(arena, unaryop.e.inner),
+        .let => |let| {
+            for (let.assignments) |ass| {
+                try normaliseExpression(arena, ass.inner.expression.inner);
+            }
+
+            try normaliseExpression(arena, let.in.inner);
+        },
+        .function => |f| try normaliseExpression(arena, f.body.inner),
+        .integer, .boolean, .identifier => return,
+        .apply => unreachable,
+    }
+}
+
+/// normaliseProgram normalises an AST into a standard, simpler form than that which comes out of the parser. Currently
+/// it just changes chains of apply binops into a single Apply expression.
+pub fn normaliseProgram(program: *parser.Program) !void {
+    for (program.stmts.items) |stmt| {
+        switch (stmt.inner) {
+            .assignment => |a| try normaliseExpression(program.arena.allocator(), a.expression.inner),
+            .expression => |e| try normaliseExpression(program.arena.allocator(), e),
+        }
+    }
+}
+
 /// Sema does semantic analysis on the given program.
 pub const Sema = struct {
     gpa: std.mem.Allocator,
@@ -214,6 +297,7 @@ pub const Sema = struct {
                 break :b Rule{ .unify = .{ .expr = .{ .loc = let.in.loc, .inner = let.in.inner } } };
             },
             .function => @panic("unimplemented"),
+            .apply => @panic("unimplemented"),
         };
 
         var gop = try self.map.getOrPutValue(
@@ -594,6 +678,52 @@ fn expectTypeCheckError(toks: []const lexer.Tok, expected: anyerror) !void {
     };
 
     try testing.expectError(expected, sema.solve());
+}
+
+fn expectNormalise(a: std.mem.Allocator, expr: *parser.Expression, expected: *parser.Expression) !void {
+    try normaliseExpression(a, expr);
+    if (!expected.eql(expr)) return error.TestExpectedEqual;
+}
+
+const NormaliseTests = struct {
+    fn e(allocator: std.mem.Allocator, expression: parser.Expression) !*parser.Expression {
+        var expr = try allocator.create(parser.Expression);
+        expr.* = expression;
+        return expr;
+    }
+
+    const loc = lexer.Loc{};
+    const locate = parser.locate;
+
+    test "normalise" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectNormalise(
+            a,
+            try e(a, .{ .binop = .{
+                .op = .apply,
+                .lhs = locate(loc, try e(a, .{ .binop = .{
+                    .op = .apply,
+                    .lhs = locate(loc, try e(a, .{ .identifier = "f" })),
+                    .rhs = locate(loc, try e(a, .{ .integer = 1 })),
+                } })),
+                .rhs = locate(loc, try e(a, .{ .integer = 2 })),
+            } }),
+            try e(a, .{ .apply = .{
+                .f = locate(loc, try e(a, .{ .identifier = "f" })),
+                .args = &[_]Located(*parser.Expression){
+                    locate(loc, try e(a, .{ .integer = 1 })),
+                    locate(loc, try e(a, .{ .integer = 2 })),
+                },
+            } }),
+        );
+    }
+};
+
+test "all" {
+    testing.refAllDecls(NormaliseTests);
 }
 
 test "identifiers" {

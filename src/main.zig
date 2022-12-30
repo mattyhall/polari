@@ -11,6 +11,7 @@ pub const log_level: std.log.Level = .info;
 
 pub const Opts = struct {
     @"dump-ast": bool = false,
+    @"dump-normalised-ast": bool = false,
     @"dump-rules": bool = false,
     @"dump-type-checking": bool = false,
     @"dump-bytecode": bool = false,
@@ -156,6 +157,29 @@ fn DotWriter(comptime W: anytype) type {
                         \\
                     , .{ .arrow_id = arrow_id, .body_e_id = body_e_id });
                 },
+                .apply => |f| {
+                    try self.w.print(
+                        \\  e_{[e_id]} [label="apply",color="white",fontcolor="white"]
+                        \\
+                    , .{ .e_id = e_id });
+
+                    const args_id = self.id();
+                    const f_id = try self.writeExpression(f.f.inner);
+                    try self.w.print(
+                        \\  e_{[e_id]} -- e_{[f_id]} [color="white"]
+                        \\  args_{[args_id]} [label="args",color="white",fontcolor="white"]
+                        \\  e_{[e_id]} -- args_{[args_id]} [color="white"]
+                        \\
+                    , .{ .e_id = e_id, .f_id = f_id, .args_id = args_id });
+
+                    for (f.args) |arg| {
+                        const arg_id = try self.writeExpression(arg.inner);
+                        try self.w.print(
+                            \\  args_{[args_id]} -- e_{[arg_id]} [color="white"]
+                            \\
+                        , .{ .args_id = args_id, .arg_id = arg_id });
+                    }
+                },
             }
 
             return e_id;
@@ -244,6 +268,13 @@ pub fn main() !void {
     defer program.deinit();
 
     if (opts.args.@"dump-ast") {
+        var w = std.io.getStdOut().writer();
+        try (DotWriter(@TypeOf(w)){ .w = w }).write(&program);
+        return;
+    }
+
+    try sema.normaliseProgram(&program);
+    if (opts.args.@"dump-normalised-ast") {
         var w = std.io.getStdOut().writer();
         try (DotWriter(@TypeOf(w)){ .w = w }).write(&program);
         return;

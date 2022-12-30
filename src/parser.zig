@@ -15,8 +15,9 @@ pub const Expression = union(enum) {
     unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
     let: struct { assignments: []Located(Assignment), in: Located(*Expression) },
     function: struct { params: []Located(Parameter), body: Located(*Expression) },
+    apply: struct { f: Located(*Expression), args: []Located(*Expression) },
 
-    fn eql(lhs: *const Expression, rhs: *const Expression) bool {
+    pub fn eql(lhs: *const Expression, rhs: *const Expression) bool {
         if (std.meta.activeTag(lhs.*) != std.meta.activeTag(rhs.*)) return false;
 
         switch (lhs.*) {
@@ -57,6 +58,15 @@ pub const Expression = union(enum) {
                 }
 
                 return f.body.inner.eql(rhs_f.body.inner);
+            },
+            .apply => |f| {
+                if (!f.f.inner.eql(rhs.apply.f.inner)) return false;
+
+                for (f.args) |arg, i| {
+                    if (!arg.inner.eql(rhs.apply.args[i].inner)) return false;
+                }
+
+                return true;
             },
         }
     }
@@ -122,6 +132,15 @@ pub const Expression = union(enum) {
                 try f.body.inner.write(writer);
                 try writer.writeAll(")");
             },
+            .apply => |f| {
+                try writer.writeAll("(");
+                try f.f.inner.write(writer);
+                for (f.args) |arg| {
+                    try writer.writeAll(" ");
+                    try arg.inner.write(writer);
+                }
+                try writer.writeAll(")");
+            },
         }
     }
 };
@@ -155,7 +174,7 @@ pub fn Located(comptime T: anytype) type {
 }
 
 /// locate puts v in its Located struct, with loc as the location.
-fn locate(loc: Loc, v: anytype) Located(@TypeOf(v)) {
+pub fn locate(loc: Loc, v: anytype) Located(@TypeOf(v)) {
     return .{ .loc = loc, .inner = v };
 }
 
