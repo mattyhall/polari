@@ -12,7 +12,6 @@ pub const log_level: std.log.Level = .info;
 pub const Opts = struct {
     @"dump-ast": bool = false,
     @"dump-normalised-ast": bool = false,
-    @"dump-rules": bool = false,
     @"dump-type-checking": bool = false,
     @"dump-bytecode": bool = false,
 };
@@ -280,22 +279,18 @@ pub fn main() !void {
         return;
     }
 
-    var s = sema.Sema.init(gpa.allocator(), &program);
+    var s = sema.Sema.init(gpa.allocator(), opts.args.@"dump-type-checking");
     defer s.deinit();
 
-    s.generateRules() catch |e| {
+    try s.prepopulate();
+
+    s.generateRules(&program) catch |e| {
         if (s.diags.items.len == 0) return e;
 
         try utils.printErrors(source, s.diags.items);
         std.os.exit(1);
     };
 
-    if (opts.args.@"dump-rules") {
-        var w = std.io.getStdOut().writer();
-        try s.printRules(w);
-    }
-
-    s.debug = opts.args.@"dump-type-checking";
     s.solve() catch |e| {
         if (s.diags.items.len == 0) return e;
 

@@ -1,117 +1,11 @@
-//! sema.zig implements semantic analysis of the program using rewriting.
-//!
-//! In order to do this we walk the program and generate `Rule`s for expressions. These rules are:
-//! 1. Type T: the given expression has a known type T
-//! 2. Unify V: the given expression has the same type as V
-//! 3. Apply fn [args]: the given expression has the type of applying fn to the given args
-//! 4. Errored: the given expression cannot be typed as there is an error
-//!
-//! Once these rules are generated they are rewritten by a well-defined process:
-//! 1. Unify V => Type T when V is known to have type T
-//! 2. Apply fn [args] => Type fn(args...) when the type of everything in args is known.
-//! 3. Unify _, Apply _ _ => Errored when any of the parameters have type Errored.
-//!
-//! These are applied until no further progress is made. Type checking is successful if all the rules are now Types. If
-//! not then there is an ambiguity. During rewriting using substitution two there may also be an error if the given
-//! function can not be applied to the given arguments.
-//!
-//! Not yet implemented is signatures (although the data structures do contain them). Variables can be annotated with a
-//! signature to say what type they are. These modify the basic algorithm in that if no progress is made we then use the
-//! signatures to do substiutions where possible. Type checking succeeds if all the rules are Types and an inferred
-//! type is compatible with the signature if there is one.
-
 const std = @import("std");
 const parser = @import("parser.zig");
+const lexer = @import("lexer.zig");
 
 const Located = parser.Located;
-
-const Type = enum { bool, int };
-
-const Id = u32;
-
-/// Something that can be given a type.
-const Variable = union(enum) {
-    expr: Located(*const parser.Expression),
-    identifier: Id,
-};
-
-const Function = union(enum) {
-    variable: Variable,
-    builtin: []const u8,
-};
-
-const Apply = struct { f: Function, arguments: []const Variable };
-
-/// Rules are associated with Variables.
-const Rule = union(enum) {
-    /// type means the type of the variable is known to be Type.
-    type: Type,
-
-    /// unify means the type of the variable is the same as Variable.
-    unify: Variable,
-
-    /// apply means the type of the variable is the result of applying f to arguments.
-    apply: Apply,
-
-    /// uninitialised is for globals which have been referenced but not yet declared. E.g. b in the first statement of
-    /// `a = b + 10; b = 5`.
-    ///
-    /// NOTE: Once all rules have been generated a variable being uninitialised should be an error.
-    uninitialised,
-
-    /// errored signals that this variable cannot be typed as there is an error. This is fatal however we will keep
-    /// substituting rules if we get this so that we can display as many type errors as possible.
-    errored,
-
-    fn deinit(self: Rule, gpa: std.mem.Allocator) void {
-        switch (self) {
-            .apply => |a| gpa.free(a.arguments),
-            .unify, .type, .uninitialised, .errored => {},
-        }
-    }
-};
-
-fn hashFn(comptime Context: type) (fn (Context, Variable) u64) {
-    return struct {
-        fn hash(_: Context, v: Variable) u64 {
-            return switch (v) {
-                .expr => |e| @intCast(u64, @ptrToInt(e.inner)),
-                .identifier => |i| @intCast(u64, i),
-            };
-        }
-    }.hash;
-}
-
-fn eqlFn(comptime Context: type) (fn (Context, Variable, Variable) bool) {
-    return struct {
-        fn eql(_: Context, lhs: Variable, rhs: Variable) bool {
-            if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
-
-            return switch (lhs) {
-                .identifier => |i| i == rhs.identifier,
-                .expr => |e| e.inner == rhs.expr.inner,
-            };
-        }
-    }.eql;
-}
-
-const MapContext = struct {
-    pub const hash = hashFn(@This());
-    pub const eql = eqlFn(@This());
-};
-
-/// Map stores a mapping of Variables to Rules.
-///
-/// NOTE: We have to use a custom context as the autoHash cannot handle unions.
-const Map = std.HashMapUnmanaged(
-    Variable,
-    struct { signature: ?Type, inferred: Rule },
-    MapContext,
-    std.hash_map.default_max_load_percentage,
-);
-
-/// VarMap maps identifier names to their identifier id.
-const VarMap = std.StringHashMapUnmanaged(Id);
+const Expression = parser.Expression;
+const Loc = lexer.Loc;
+const Diag = lexer.Diag;
 
 /// normaliseApply takes the lhs and rhs of an apply binop and recurses down its lhs to find the function being called.
 /// It adds any arguments of that function to args, and returns the function.
@@ -196,647 +90,483 @@ pub fn normaliseProgram(program: *parser.Program) !void {
     }
 }
 
-/// Sema does semantic analysis on the given program.
+fn hashFn(comptime Context: type) (fn (Context, Variable) u64) {
+    return struct {
+        fn hash(_: Context, v: Variable) u64 {
+            return switch (v) {
+                .id => |i| @intCast(u64, i),
+                .expr => |e| @intCast(u64, @ptrToInt(e)),
+            };
+        }
+    }.hash;
+}
+
+fn eqlFn(comptime Context: type) (fn (Context, Variable, Variable) bool) {
+    return struct {
+        fn eql(_: Context, lhs: Variable, rhs: Variable) bool {
+            if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+
+            return switch (lhs) {
+                .id => |i| i == rhs.id,
+                .expr => |e| e == rhs.expr,
+            };
+        }
+    }.eql;
+}
+
+const MapContext = struct {
+    pub const hash = hashFn(@This());
+    pub const eql = eqlFn(@This());
+};
+
+const Type = union(enum) {
+    bool,
+    int,
+    function: struct { params: []const Type, ret: *Type },
+    unknown,
+
+    pub fn eql(lhs: Type, rhs: Type) bool {
+        if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+        // FIXME: do we need equality for functions?
+        return lhs != .function and lhs != .unknown;
+    }
+
+    fn write(self: Type, writer: anytype) !void {
+        switch (self) {
+            .bool => try writer.writeAll("Bool"),
+            .int => try writer.writeAll("Int"),
+            .function => |f| {
+                try writer.writeAll("Fn [");
+                for (f.params) |param, i| {
+                    try param.write(writer);
+                    if (i < f.params.len - 1) try writer.writeAll(" ");
+                }
+                try writer.writeAll("] ");
+
+                try f.ret.write(writer);
+            },
+            .unknown => try writer.writeAll("???"),
+        }
+    }
+
+    fn deinit(self: Type, gpa: std.mem.Allocator) void {
+        if (self != .function) return;
+        gpa.free(self.function.params);
+        gpa.destroy(self.function.ret);
+    }
+};
+
+const Id = u32;
+
+/// Variable represents something that can be given a type.
+const Variable = union(enum) {
+    /// id is the Id of an identifier in the program.
+    id: Id,
+    expr: *const Expression,
+
+    fn write(self: Variable, writer: anytype) !void {
+        switch (self) {
+            .id => |i| try writer.print("<{}>", .{i}),
+            .expr => |e| try e.write(writer),
+        }
+    }
+};
+
+const TypeMap = std.HashMapUnmanaged(Variable, Type, MapContext, std.hash_map.default_max_load_percentage);
+const VarMap = std.StringHashMapUnmanaged(Id);
+const LocMap = std.HashMapUnmanaged(Variable, Loc, MapContext, std.hash_map.default_max_load_percentage);
+
+/// Unification means that the type of lhs should be found by the rhs rule.
+const Unification = struct { lhs: Variable, rhs: Rule };
+
+/// A rule is some way of finding a type given other variables.
+const Rule = union(enum) {
+    /// f is a function and we should have the same type as the parameter with index param.
+    parameter: struct { param: u32, f: Variable },
+
+    /// Variable is a function and we should have the same type as its return.
+    ret: Variable,
+
+    /// We should have the same type as Variable.
+    variable: Variable,
+
+    fn write(self: Rule, writer: anytype) !void {
+        switch (self) {
+            .parameter => |p| {
+                try writer.print("Parameter {} of ", .{p.param});
+                try p.f.write(writer);
+            },
+            .ret => |v| {
+                try writer.writeAll("Return type of ");
+                try v.write(writer);
+            },
+            .variable => |v| try v.write(writer),
+        }
+    }
+};
+
 pub const Sema = struct {
     gpa: std.mem.Allocator,
-    map: Map,
-
-    /// var_maps is a list of VarMaps. Each scope has its own VarMap - a mapping of identifier name to id.
+    debug: bool,
+    current_id: Id,
+    made_progress: bool,
+    /// types maps variables to their types.
+    types: TypeMap,
+    /// var_maps is a list of VarMaps: a map from an identifier to an Id.
     var_maps: std.ArrayListUnmanaged(VarMap),
+    unifications: std.ArrayListUnmanaged(Unification),
+    /// locations maps Variables to their locations.
+    locations: LocMap,
+    diags: std.ArrayListUnmanaged(Diag),
 
-    program: *const parser.Program,
-    id: Id = 0,
-
-    diags: std.ArrayListUnmanaged(lexer.Diag) = std.ArrayListUnmanaged(lexer.Diag){},
-    debug: bool = false,
-
-    const Error = error{
-        OutOfMemory,
-        VariableNotFound,
-        CouldNotInferType,
-        TypeMismatch,
-        WrongNumberOfArgs,
-        Recursion,
-        Redefinition,
-    };
-
-    const FindResult = struct { id: Id, depth: usize };
-    const Update = union(enum) { errored, t: Type };
-
-    pub fn init(gpa: std.mem.Allocator, program: *const parser.Program) Sema {
-        return .{ .gpa = gpa, .map = Map{}, .var_maps = .{}, .program = program };
+    pub fn init(gpa: std.mem.Allocator, debug: bool) Sema {
+        return .{
+            .gpa = gpa,
+            .debug = debug,
+            .current_id = 0,
+            .made_progress = true,
+            .types = .{},
+            .var_maps = .{},
+            .unifications = .{},
+            .locations = .{},
+            .diags = .{},
+        };
     }
 
-    /// getId returns the next identifier id.
-    fn getId(self: *Sema) Id {
-        self.id += 1;
-        return self.id - 1;
+    /// id generates a new Id for an identifier.
+    fn id(self: *Sema) Id {
+        self.current_id += 1;
+        return self.current_id - 1;
     }
 
-    /// currentVarMap returns the VarMap for the current scope.
     fn currentVarMap(self: *Sema) *VarMap {
         return &self.var_maps.items[self.var_maps.items.len - 1];
     }
 
-    fn generateRulesForExpression(self: *Sema, expr: Located(*parser.Expression)) Error!void {
-        var rule: Rule = switch (expr.inner.*) {
-            .integer => Rule{ .type = .int },
-            .boolean => Rule{ .type = .bool },
-            .binop => |binop| b: {
-                try self.generateRulesForExpression(binop.lhs);
-                try self.generateRulesForExpression(binop.rhs);
-
-                var args = try self.gpa.alloc(Variable, 2);
-                errdefer self.gpa.free(args);
-
-                args[0] = .{ .expr = .{ .loc = binop.lhs.loc, .inner = binop.lhs.inner } };
-                args[1] = .{ .expr = .{ .loc = binop.rhs.loc, .inner = binop.rhs.inner } };
-
-                const op = switch (binop.op) {
-                    .plus => "+",
-                    .minus => "-",
-                    .multiply => "*",
-                    .divide => "/",
-                    .apply => @panic("unreachable"),
-                };
-
-                break :b Rule{ .apply = .{ .f = .{ .builtin = op }, .arguments = args } };
-            },
-            .unaryop => |unaryop| b: {
-                if (unaryop.op == .grouping) {
-                    try self.generateRulesForExpression(unaryop.e);
-                    break :b Rule{ .unify = .{ .expr = .{ .loc = unaryop.e.loc, .inner = unaryop.e.inner } } };
-                }
-
-                try self.generateRulesForExpression(unaryop.e);
-
-                var args = try self.gpa.alloc(Variable, 1);
-                errdefer self.gpa.free(args);
-
-                args[0] = .{ .expr = .{ .loc = unaryop.e.loc, .inner = unaryop.e.inner } };
-
-                const op = switch (unaryop.op) {
-                    .negate => "-",
-                    .grouping => unreachable,
-                };
-
-                break :b Rule{ .apply = .{ .f = .{ .builtin = op }, .arguments = args } };
-            },
-            .identifier => |i| Rule{ .unify = .{ .identifier = (try self.findId(expr.loc, i)).id } },
-            .let => |let| b: {
-                // let defines a new scope so create a new VarMap and put everything in it.
-                try self.var_maps.append(self.gpa, .{});
-
-                for (let.assignments) |*a| try self.generateRulesForAssignment(a.loc, &a.inner);
-                try self.generateRulesForExpression(let.in);
-
-                var map = self.var_maps.pop();
-                map.deinit(self.gpa);
-
-                // The type of a let is the type of it's in clause, so unify.
-                break :b Rule{ .unify = .{ .expr = .{ .loc = let.in.loc, .inner = let.in.inner } } };
-            },
-            .function => @panic("unimplemented"),
-            .apply => @panic("unimplemented"),
-        };
-
-        var gop = try self.map.getOrPutValue(
-            self.gpa,
-            .{ .expr = .{ .loc = expr.loc, .inner = expr.inner } },
-            .{ .signature = null, .inferred = undefined },
-        );
-        gop.value_ptr.inferred = rule;
+    fn allocDiag(self: *Sema, loc: lexer.Loc, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+        const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
+        try self.diags.append(self.gpa, Diag{ .msg = msg, .allocator = self.gpa, .loc = loc });
     }
 
-    /// findId finds the deepest identifier id with the name identifier.
-    fn findId(self: *Sema, loc: lexer.Loc, identifier: []const u8) Error!FindResult {
-        var i: usize = self.var_maps.items.len - 1;
-        while (true) : (i -= 1) {
-            const id = self.var_maps.items[i].get(identifier) orelse {
-                if (i == 0) {
-                    try self.allocDiag(loc, "undeclared variable {s}", .{identifier});
-                    return error.VariableNotFound;
-                }
-
-                continue;
-            };
-
-            return .{ .id = id, .depth = self.var_maps.items.len - 1 - i };
-        }
-    }
-
-    fn generateRulesForAssignment(self: *Sema, loc: lexer.Loc, assignment: *const parser.Assignment) Error!void {
-        try self.generateRulesForExpression(assignment.expression);
-
-        if (self.currentVarMap().contains(assignment.identifier)) {
-            try self.allocDiag(loc, "redefinition of variable {s}", .{assignment.identifier});
-            return error.Redefinition;
-        }
-
-        const id = self.getId();
-        try self.currentVarMap().put(self.gpa, assignment.identifier, id);
-        try self.map.put(self.gpa, .{ .identifier = id }, .{ .signature = null, .inferred = .uninitialised });
-
-        const gop = try self.map.getOrPutValue(
-            self.gpa,
-            .{ .identifier = id },
-            .{ .signature = null, .inferred = undefined },
-        );
-        gop.value_ptr.inferred = .{ .unify = .{
-            .expr = .{ .loc = assignment.expression.loc, .inner = assignment.expression.inner },
-        } };
-    }
-
-    pub fn generateRules(self: *Sema) Error!void {
+    /// prepopulate adds the types of builtin functions.
+    pub fn prepopulate(self: *Sema) error{OutOfMemory}!void {
         try self.var_maps.append(self.gpa, .{});
-        // Prepopulate the globals with uninitialised so we do not get a variable not found error when a statement
-        // refers to an identifier defined after itself.
-        for (self.program.stmts.items) |stmt| {
-            switch (stmt.inner) {
-                .assignment => |a| {
-                    if (self.var_maps.items[0].contains(a.identifier)) {
-                        try self.allocDiag(stmt.loc, "redefinition of variable {s}", .{a.identifier});
-                        return error.Redefinition;
-                    }
 
-                    var id = self.getId();
-                    try self.currentVarMap().put(self.gpa, a.identifier, id);
-                    try self.map.put(self.gpa, .{ .identifier = id }, .{ .signature = null, .inferred = .uninitialised });
-                },
-                else => {},
-            }
+        const ops = [_][]const u8{ "+", "-", "*", "/" };
+
+        try self.types.ensureUnusedCapacity(self.gpa, ops.len);
+        try self.currentVarMap().ensureUnusedCapacity(self.gpa, ops.len);
+
+        for (ops) |op| {
+            var params = try self.gpa.alloc(Type, 2);
+            errdefer self.gpa.free(params);
+            params[0] = .int;
+            params[1] = .int;
+
+            var ret = try self.gpa.create(Type);
+            errdefer self.gpa.destroy(ret);
+            ret.* = .int;
+
+            var t = .{ .function = .{ .ret = ret, .params = params } };
+
+            const op_id = self.id();
+            self.types.putAssumeCapacity(.{ .id = op_id }, t);
+
+            self.currentVarMap().putAssumeCapacity(op, op_id);
         }
 
-        for (self.program.stmts.items) |stmt| {
-            switch (stmt.inner) {
-                .assignment => |assignment| {
-                    try self.generateRulesForExpression(assignment.expression);
+        {
+            var params = try self.gpa.alloc(Type, 1);
+            params[0] = .int;
 
-                    const id = try self.findId(stmt.loc, assignment.identifier);
+            var ret = try self.gpa.create(Type);
+            ret.* = .int;
 
-                    const gop = try self.map.getOrPutValue(
-                        self.gpa,
-                        .{ .identifier = id.id },
-                        .{ .signature = null, .inferred = undefined },
-                    );
-                    gop.value_ptr.inferred = .{ .unify = .{
-                        .expr = .{ .loc = assignment.expression.loc, .inner = assignment.expression.inner },
-                    } };
-                },
-                .expression => |e| try self.generateRulesForExpression(.{ .loc = stmt.loc, .inner = e }),
-            }
-        }
-    }
+            var t = .{ .function = .{ .ret = ret, .params = params } };
 
-    fn printVariable(v: Variable, writer: anytype) !void {
-        switch (v) {
-            .expr => |e| try e.inner.write(writer),
-            .identifier => |i| try writer.print("<{}>", .{i}),
+            const op_id = self.id();
+            self.types.putAssumeCapacity(.{ .id = op_id }, t);
+
+            self.currentVarMap().putAssumeCapacity("<negate>", op_id);
         }
     }
 
-    fn printRule(r: Rule, writer: anytype) !void {
-        switch (r) {
-            .type => |t| switch (t) {
-                .int => try writer.print("Int", .{}),
-                .bool => try writer.print("Bool", .{}),
-            },
-            .unify => |v| {
-                try writer.print("Unify ", .{});
-                try printVariable(v, writer);
-            },
-            .apply => |a| {
-                try writer.print("Apply ", .{});
-
-                switch (a.f) {
-                    .variable => |v| try printVariable(v, writer),
-                    .builtin => |s| try writer.print("{s}", .{s}),
-                }
-                try writer.print(" ", .{});
-
-                for (a.arguments) |arg| {
-                    try printVariable(arg, writer);
-                    try writer.print(" ", .{});
-                }
-            },
-            .errored => try writer.writeAll("XXX"),
-            .uninitialised => try writer.writeAll("???"),
+    /// findIdentifier finds the Id of ident.
+    fn findIdentifier(self: *const Sema, ident: []const u8) ?Id {
+        var i = self.var_maps.items.len - 1;
+        while (true) : (i -= 1) {
+            var map = self.var_maps.items[i];
+            if (map.get(ident)) |ident_id| return ident_id;
+            if (i == 0) return null;
         }
     }
 
-    pub fn printRules(self: *const Sema, writer: anytype) !void {
-        try writer.writeAll("================================\n");
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            try printVariable(entry.key_ptr.*, writer);
-            try writer.print(" : ", .{});
-            try printRule(entry.value_ptr.inferred, writer);
-            try writer.print("\n", .{});
-        }
-    }
+    pub fn writeState(self: *const Sema, writer: anytype) !void {
+        try writer.writeAll("============================\n");
 
-    fn allResolved(self: *const Sema, variables: []const Variable) Error!bool {
-        for (variables) |variable| {
-            const r = self.map.get(variable) orelse return error.VariableNotFound;
-            switch (r.inferred) {
-                .apply, .unify, .uninitialised => return false,
-                .type, .errored => {},
-            }
-        }
-
-        return true;
-    }
-
-    fn allocDiag(self: *Sema, loc: lexer.Loc, comptime fmt: []const u8, args: anytype) !void {
-        var msg = try std.fmt.allocPrint(self.gpa, fmt, args);
-        errdefer self.gpa.free(msg);
-
-        try self.diags.append(self.gpa, .{ .loc = loc, .msg = msg, .allocator = self.gpa });
-    }
-
-    /// checkForRecusion checks whether needle is referenced in haystack or any of its children.
-    fn checkForRecursion(self: *Sema, loc: lexer.Loc, needle: Variable, haystack: Rule) !void {
-        var e = switch (needle) {
-            .expr => |e| e,
-            .identifier => return,
-        };
-
-        switch (haystack) {
-            .unify => |v| switch (v) {
-                .expr => |e2| b: {
-                    if (e.inner == e2.inner) break :b;
-
-                    var r = self.map.get(v) orelse unreachable;
-                    return try self.checkForRecursion(loc, needle, r.inferred);
-                },
-                .identifier => |i| {
-                    var r = self.map.get(.{ .identifier = i }) orelse unreachable;
-                    return try self.checkForRecursion(loc, needle, r.inferred);
-                },
-            },
-            .apply => |a| b: {
-                for (a.arguments) |arg| {
-                    switch (arg) {
-                        .expr => |e2| if (e.inner == e2.inner) break :b,
-                        else => {},
-                    }
-
-                    var r = self.map.get(arg) orelse unreachable;
-                    return try self.checkForRecursion(loc, needle, r.inferred);
-                }
-            },
-            .type, .errored, .uninitialised => return,
-        }
-
-        try self.allocDiag(loc, "variable cannot refer to itself", .{});
-        return error.Recursion;
-    }
-
-    /// solveApply solves an Apply rule - i.e. a function call.
-    fn solveApply(self: *Sema, apply: Apply) Error!?Type {
-        if (!try self.allResolved(apply.arguments)) return null;
-
-        switch (apply.f) {
-            .builtin => |b| {
-                if (std.mem.indexOf(u8, "+/*-", b) != null) {
-                    const is_minus = std.mem.eql(u8, "-", b);
-                    if (is_minus and apply.arguments.len != 1 and apply.arguments.len != 2) {
-                        return error.WrongNumberOfArgs;
-                    }
-
-                    if (!is_minus and apply.arguments.len != 2) return error.WrongNumberOfArgs;
-
-                    for (apply.arguments) |arg| {
-                        const r = self.map.get(arg) orelse return error.VariableNotFound;
-                        if (r.inferred == .errored) return error.TypeMismatch;
-
-                        if (r.inferred.type != .int) {
-                            // FIXME: Pass a proper loc here.
-                            try self.allocDiag(arg.expr.loc, "{s} takes integer arguments, got: {}", .{ b, r.inferred.type });
-                            return error.TypeMismatch;
-                        }
-                    }
-                    return Type.int;
-                } else return error.VariableNotFound;
-            },
-            .variable => unreachable,
-        }
-    }
-
-    /// solve solves the rules in the map.
-    pub fn solve(self: *Sema) !void {
-        var err: ?Error = null;
-
-        var updates = std.HashMapUnmanaged(
-            Variable,
-            Update,
-            MapContext,
-            std.hash_map.default_max_load_percentage,
-        ){};
-        defer updates.deinit(self.gpa);
-
-        var made_progress = true;
-
-        var w = std.io.getStdErr().writer();
-        if (self.debug) try self.printRules(w);
-
-        while (made_progress) {
-            updates.clearRetainingCapacity();
-
-            var it = self.map.iterator();
+        try writer.writeAll("=========== Types ==========\n");
+        {
+            var it = self.types.iterator();
             while (it.next()) |entry| {
-                switch (entry.value_ptr.*.inferred) {
-                    .type, .errored => continue,
-                    .unify => |v| {
-                        const e = self.map.get(v) orelse unreachable;
-                        switch (e.inferred) {
-                            .type => |t| try updates.put(self.gpa, entry.key_ptr.*, .{ .t = t }),
-                            .errored => try updates.put(self.gpa, entry.key_ptr.*, .errored),
-                            else => {},
-                        }
-                    },
-                    .apply => |a| {
-                        var u: Update = b: {
-                            var t = self.solveApply(a) catch |e| {
-                                err = e;
-                                switch (e) {
-                                    error.WrongNumberOfArgs, error.TypeMismatch => break :b .errored,
-                                    else => return e,
-                                }
-                            };
-                            break :b .{ .t = t orelse continue };
-                        };
-
-                        try updates.put(self.gpa, entry.key_ptr.*, u);
-                    },
-                    .uninitialised => return error.Uninitialised,
-                }
+                try entry.key_ptr.write(writer);
+                try writer.writeAll(" => ");
+                try entry.value_ptr.write(writer);
+                try writer.writeAll("\n");
             }
-
-            if (updates.size == 0) {
-                made_progress = false;
-                continue;
-            }
-
-            var uit = updates.iterator();
-            while (uit.next()) |entry| {
-                var e = self.map.getEntry(entry.key_ptr.*) orelse unreachable;
-                e.value_ptr.inferred.deinit(self.gpa);
-                e.value_ptr.inferred = switch (entry.value_ptr.*) {
-                    .t => |t| .{ .type = t },
-                    .errored => .errored,
-                };
-            }
-
-            if (self.debug) try self.printRules(w);
         }
 
-        if (self.debug) try self.printRules(w);
+        try writer.writeAll("======= Unifications =======\n");
+        for (self.unifications.items) |unif| {
+            try unif.lhs.write(writer);
+            try writer.writeAll(" : ");
+            try unif.rhs.write(writer);
+            try writer.writeAll("\n");
+        }
+    }
 
-        // Check for variables referring to themselves.
-        var it = self.map.iterator();
-        while (it.next()) |entry| {
-            // We start the checking from variables that are expressions, so skip identifiers.
-            if (entry.key_ptr.* != .expr) continue;
+    /// generateRulesForExpression generates unifications for the given expression.
+    fn generateRulesForExpression(self: *Sema, loc: Loc, expr: *const Expression) !void {
+        const v = Variable{ .expr = expr };
+        try self.locations.put(self.gpa, v, loc);
 
-            switch (entry.value_ptr.inferred) {
-                .type => {},
-                // If we have an errored variable then we must have set err somewhere else, so skip
-                .errored => {},
-                else => {
-                    try self.checkForRecursion(entry.key_ptr.expr.loc, entry.key_ptr.*, entry.value_ptr.inferred);
+        switch (expr.*) {
+            .integer => {
+                try self.types.put(self.gpa, v, .int);
+                return;
+            },
+            .boolean => {
+                try self.types.put(self.gpa, v, .int);
+                return;
+            },
+            else => try self.types.put(self.gpa, v, .unknown),
+        }
 
-                    try self.allocDiag(entry.key_ptr.expr.loc, "could not infer type", .{});
-                    err = error.CouldNotInferType;
+        switch (expr.*) {
+            .integer, .boolean => unreachable,
+            .identifier => |i| {
+                const ident_id = self.findIdentifier(i) orelse {
+                    try self.allocDiag(loc, "could not find variable {s}", .{i});
+                    return error.CouldNotFindVariable;
+                };
+
+                try self.unifications.append(self.gpa, .{
+                    .lhs = v,
+                    .rhs = .{ .variable = .{ .id = ident_id } },
+                });
+            },
+            .binop => unreachable,
+            .unaryop => unreachable,
+            .let => unreachable,
+            .function => unreachable,
+            .apply => unreachable,
+        }
+    }
+
+    /// generateRules generates unifications for the given program.
+    pub fn generateRules(self: *Sema, program: *const parser.Program) !void {
+        // Add top-level variables so that they don't need to be in a certain order to type check. E.g. a=b;b=1; should
+        // be valid.
+        for (program.stmts.items) |stmt| {
+            var a = if (stmt.inner == .assignment) stmt.inner.assignment else continue;
+
+            if (self.currentVarMap().contains(a.identifier)) {
+                try self.allocDiag(stmt.loc, "redefinition of {s}", .{a.identifier});
+                return error.Redefinition;
+            }
+
+            const a_id = self.id();
+            try self.currentVarMap().put(self.gpa, a.identifier, a_id);
+            try self.types.put(self.gpa, .{ .id = a_id }, .unknown);
+        }
+
+        for (program.stmts.items) |stmt| {
+            switch (stmt.inner) {
+                .expression => |e| try self.generateRulesForExpression(stmt.loc, e),
+                .assignment => |a| {
+                    const a_id = self.findIdentifier(a.identifier) orelse unreachable;
+                    try self.currentVarMap().put(self.gpa, a.identifier, a_id);
+                    const entry = self.types.getEntry(.{ .id = a_id }) orelse unreachable;
+
+                    switch (a.expression.inner.*) {
+                        .integer => entry.value_ptr.* = .int,
+                        .boolean => entry.value_ptr.* = .bool,
+                        else => {
+                            try self.generateRulesForExpression(a.expression.loc, a.expression.inner);
+                            try self.unifications.append(self.gpa, .{
+                                .lhs = .{ .id = a_id },
+                                .rhs = .{ .variable = .{ .expr = a.expression.inner } },
+                            });
+                        },
+                    }
                 },
             }
         }
 
-        if (err) |e| return e;
+        if (self.debug) {
+            var w = std.io.getStdErr().writer();
+            var it = self.currentVarMap().iterator();
+            try w.writeAll("======================\n");
+            while (it.next()) |entry| {
+                try w.print("{s} => <{}>\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            }
+        }
+    }
+
+    /// setType sets the type of v to t if it was previously unknown, otherwise it checks that t is the same as v's
+    /// type.
+    fn setType(self: *Sema, v: Variable, t: Type) !void {
+        var e = self.types.getEntry(v) orelse unreachable;
+        if (e.value_ptr.* == .unknown) {
+            e.value_ptr.* = t;
+            self.made_progress = true;
+            return;
+        }
+
+        if (!e.value_ptr.eql(t)) {
+            const loc = self.locations.get(v) orelse Loc{};
+            try self.allocDiag(loc, "type mismatch: expected {}, got {}", .{ e.value_ptr.*, t });
+            return error.TypeMismatch;
+        }
+
+        self.made_progress = true;
+    }
+
+    /// solve tries to find the type of all expressions.
+    pub fn solve(self: *Sema) !void {
+        var w = std.io.getStdOut().writer();
+
+        while (self.made_progress) {
+            if (self.debug) try self.writeState(w);
+
+            self.made_progress = false;
+
+            var i: usize = 0;
+            while (i < self.unifications.items.len) {
+                const unif = self.unifications.items[i];
+                i += 1;
+
+                switch (unif.rhs) {
+                    .variable => |v| {
+                        const t = self.types.get(v) orelse unreachable;
+                        switch (t) {
+                            .unknown => continue,
+                            else => {
+                                try self.setType(unif.lhs, t);
+                                _ = self.unifications.swapRemove(i - 1);
+                                i -= 1;
+                            },
+                        }
+                    },
+                    else => @panic("not implemented"),
+                }
+            }
+        }
+
+        if (self.debug) try self.writeState(w);
+
+        {
+            var it = self.types.iterator();
+            while (it.next()) |entry| {
+                switch (entry.value_ptr.*) {
+                    .unknown => {
+                        const loc = self.locations.get(entry.key_ptr.*) orelse Loc{};
+                        try self.allocDiag(loc, "could not infer type", .{});
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        if (self.diags.items.len > 0) return error.TypeCheckFailed;
     }
 
     pub fn deinit(self: *Sema) void {
-        var it = self.map.iterator();
-        while (it.next()) |e| e.value_ptr.inferred.deinit(self.gpa);
-        self.map.deinit(self.gpa);
+        {
+            var it = self.types.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.gpa);
+            }
+            self.types.deinit(self.gpa);
+        }
 
-        for (self.var_maps.items) |*var_map| var_map.deinit(self.gpa);
+        for (self.var_maps.items) |*vm| {
+            vm.deinit(self.gpa);
+        }
         self.var_maps.deinit(self.gpa);
 
-        for (self.diags.items) |*diag| diag.deinit();
+        for (self.diags.items) |*d| d.deinit();
         self.diags.deinit(self.gpa);
+
+        self.unifications.deinit(self.gpa);
+        self.locations.deinit(self.gpa);
     }
 };
 
 const testing = std.testing;
-const lexer = @import("lexer.zig");
 
-const TestTypeCheckResult = struct { ident: []const u8, type: Type };
+fn expectTypesEqual(source: []const u8, expected: []const struct { id: []const u8, t: Type }) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
 
-fn expectTypeCheck(toks: []const lexer.Tok, identifiers: []const TestTypeCheckResult) !void {
-    var l = parser.Lexer{ .fake = lexer.Fake{ .toks = toks } };
     var p = parser.Parser.init(testing.allocator, l);
     defer p.deinit();
 
     var program = try p.parse();
     defer program.deinit();
 
-    var sema = Sema.init(testing.allocator, &program);
+    var sema = Sema.init(testing.allocator, false);
     defer sema.deinit();
 
-    try sema.generateRules();
+    try sema.prepopulate();
+    try sema.generateRules(&program);
     try sema.solve();
 
-    for (identifiers) |ident| {
-        const id = sema.var_maps.items[0].get(ident.ident) orelse unreachable;
-        const v = sema.map.get(.{ .identifier = id }) orelse unreachable;
-        if (ident.type != v.inferred.type) {
-            std.debug.print(
-                "Expected \"{s}\" to be of type {}, but it is actually {}\n",
-                .{ ident.ident, ident.type, v.inferred },
-            );
-            return error.MismatchTypes;
+    for (expected) |item| {
+        const id = sema.currentVarMap().get(item.id) orelse return error.IdNotFound;
+        const t = sema.types.get(.{ .id = id }) orelse return error.IdNotFound;
+        if (!t.eql(item.t)) {
+            std.debug.print("type of {s} incorrect; expected {}, got {}\n", .{ item.id, item.t, t });
         }
     }
 }
 
-fn expectTypeCheckError(toks: []const lexer.Tok, expected: anyerror) !void {
-    var l = parser.Lexer{ .fake = lexer.Fake{ .toks = toks } };
+fn expectTypeCheckFail(source: []const u8, err: anyerror) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
+
     var p = parser.Parser.init(testing.allocator, l);
     defer p.deinit();
 
     var program = try p.parse();
     defer program.deinit();
 
-    var sema = Sema.init(testing.allocator, &program);
+    var sema = Sema.init(testing.allocator, false);
     defer sema.deinit();
 
-    const err = sema.generateRules();
+    try sema.prepopulate();
+
+    var e = sema.generateRules(&program);
     err catch {
-        try testing.expectError(expected, err);
+        try testing.expectError(err, e);
         return;
     };
 
-    try testing.expectError(expected, sema.solve());
+    e = sema.solve();
+    e catch {
+        try testing.expectError(err, e);
+        return;
+    };
+
+    return error.TestExpectError;
 }
 
-fn expectNormalise(a: std.mem.Allocator, expr: *parser.Expression, expected: *parser.Expression) !void {
-    try normaliseExpression(a, expr);
-    if (!expected.eql(expr)) return error.TestExpectedEqual;
+test "assignments" {
+    try expectTypesEqual("a=b;b=1;c=true;", &.{
+        .{ .id = "a", .t = .int },
+        .{ .id = "b", .t = .int },
+        .{ .id = "c", .t = .bool },
+    });
 }
 
-const NormaliseTests = struct {
-    fn e(allocator: std.mem.Allocator, expression: parser.Expression) !*parser.Expression {
-        var expr = try allocator.create(parser.Expression);
-        expr.* = expression;
-        return expr;
-    }
-
-    const loc = lexer.Loc{};
-    const locate = parser.locate;
-
-    test "normalise" {
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        var a = arena.allocator();
-
-        try expectNormalise(
-            a,
-            try e(a, .{ .binop = .{
-                .op = .apply,
-                .lhs = locate(loc, try e(a, .{ .binop = .{
-                    .op = .apply,
-                    .lhs = locate(loc, try e(a, .{ .identifier = "f" })),
-                    .rhs = locate(loc, try e(a, .{ .integer = 1 })),
-                } })),
-                .rhs = locate(loc, try e(a, .{ .integer = 2 })),
-            } }),
-            try e(a, .{ .apply = .{
-                .f = locate(loc, try e(a, .{ .identifier = "f" })),
-                .args = &[_]Located(*parser.Expression){
-                    locate(loc, try e(a, .{ .integer = 1 })),
-                    locate(loc, try e(a, .{ .integer = 2 })),
-                },
-            } }),
-        );
-    }
-};
-
-test "all" {
-    testing.refAllDecls(NormaliseTests);
-}
-
-test "identifiers" {
-    try expectTypeCheck(
-        &.{ .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .semicolon },
-        &.{.{ .ident = "a", .type = .int }},
-    );
-
-    try expectTypeCheck(
-        &.{ .{ .identifier = "a" }, .equals, .true, .semicolon },
-        &.{.{ .ident = "a", .type = .bool }},
-    );
-}
-
-test "maths" {
-    try expectTypeCheck(
-        &.{ .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .plus, .{ .integer = 2 }, .semicolon },
-        &.{.{ .ident = "a", .type = .int }},
-    );
-
-    try expectTypeCheck(
-        &.{ .{ .identifier = "a" }, .equals, .minus, .{ .integer = 1 }, .semicolon },
-        &.{.{ .ident = "a", .type = .int }},
-    );
-
-    try expectTypeCheck(
-        &.{
-            .{ .identifier = "a" },
-            .equals,
-            .{ .integer = 1 },
-            .plus,
-            .{ .integer = 2 },
-            .semicolon,
-            .{ .identifier = "b" },
-            .equals,
-            .{ .identifier = "a" },
-            .plus,
-            .{ .integer = 3 },
-            .semicolon,
-        },
-        &.{ .{ .ident = "a", .type = .int }, .{ .ident = "b", .type = .int } },
-    );
-}
-
-test "fail: maths" {
-    try expectTypeCheckError(&.{ .{ .integer = 1 }, .plus, .true, .semicolon }, error.TypeMismatch);
-
-    try expectTypeCheckError(&.{
-        .{ .identifier = "a" },
-        .equals,
-        .{ .integer = 1 },
-        .plus,
-        .{ .integer = 2 },
-        .semicolon,
-        .{ .identifier = "b" },
-        .equals,
-        .{ .identifier = "a" },
-        .plus,
-        .true,
-        .semicolon,
-    }, error.TypeMismatch);
-}
-
-test "fail: assignment" {
-    try expectTypeCheckError(
-        &.{ .{ .identifier = "a" }, .equals, .true, .semicolon, .{ .identifier = "a" }, .equals, .true, .semicolon },
-        error.Redefinition,
-    );
-}
-
-test "scopes" {
-    try expectTypeCheck(
-        &.{
-            .{ .identifier = "a" },
-            .equals,
-            .true,
-            .semicolon,
-            .{ .identifier = "b" },
-            .equals,
-            .let,
-            .{ .identifier = "a" },
-            .equals,
-            .{ .integer = 1 },
-            .semicolon,
-            .in,
-            .{ .identifier = "a" },
-            .semicolon,
-        },
-        &.{
-            .{ .ident = "a", .type = .bool },
-            .{ .ident = "b", .type = .int },
-        },
-    );
-}
-
-test "fail: scopes" {
-    try expectTypeCheckError(
-        &.{
-            .{ .identifier = "b" },
-            .equals,
-            .let,
-            .{ .identifier = "a" },
-            .equals,
-            .{ .integer = 1 },
-            .semicolon,
-            .{ .identifier = "a" },
-            .equals,
-            .{ .integer = 1 },
-            .semicolon,
-            .in,
-            .{ .identifier = "a" },
-            .semicolon,
-        },
-        error.Redefinition,
-    );
+test "fail: assignments" {
+    try expectTypeCheckFail("a=b;", error.CouldNotFindVariable);
+    try expectTypeCheckFail("a=1;a=true;", error.Redefinition);
 }
