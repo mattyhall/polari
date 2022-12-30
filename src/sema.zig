@@ -124,6 +124,7 @@ const Type = union(enum) {
     int,
     function: struct { params: []const Type, ret: *Type },
     unknown,
+    errored,
 
     pub fn eql(lhs: Type, rhs: Type) bool {
         if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
@@ -146,6 +147,7 @@ const Type = union(enum) {
                 try f.ret.write(writer);
             },
             .unknown => try writer.writeAll("???"),
+            .errored => try writer.writeAll("XXX"),
         }
     }
 
@@ -365,6 +367,7 @@ pub const Sema = struct {
             .identifier => |i| {
                 const ident_id = self.findIdentifier(i) orelse {
                     try self.allocDiag(loc, "could not find variable {s}", .{i});
+                    try self.setType(v, .errored);
                     return error.CouldNotFindVariable;
                 };
 
@@ -421,7 +424,8 @@ pub const Sema = struct {
 
             if (self.currentVarMap().contains(a.identifier)) {
                 try self.allocDiag(stmt.loc, "redefinition of {s}", .{a.identifier});
-                return error.Redefinition;
+                try self.setType(.{ .id = self.currentVarMap().get(a.identifier) orelse unreachable }, .errored);
+                continue;
             }
 
             const a_id = self.id();
@@ -475,7 +479,7 @@ pub const Sema = struct {
         if (!e.value_ptr.eql(t)) {
             const loc = self.locations.get(v) orelse Loc{};
             try self.allocDiag(loc, "type mismatch: expected {}, got {}", .{ t, e.value_ptr.* });
-            return error.TypeMismatch;
+            return;
         }
 
         self.made_progress = true;
@@ -506,14 +510,16 @@ pub const Sema = struct {
                         else => |t| {
                             const loc = self.locations.get(unif.lhs) orelse Loc{};
                             try self.allocDiag(loc, "expected function, got: {}", .{t});
-                            return error.TypeMistmatch;
+                            try self.setType(unif.lhs, .errored);
+                            return;
                         },
                     };
 
                     if (p.param >= t.params.len) {
                         const loc = self.locations.get(unif.lhs) orelse Loc{};
                         try self.allocDiag(loc, "too many arguments to function", .{});
-                        return error.TypeMistmatch;
+                        try self.setType(unif.lhs, .errored);
+                        return;
                     }
 
                     try self.setType(unif.lhs, t.params[p.param]);
@@ -527,7 +533,8 @@ pub const Sema = struct {
                         else => |t| {
                             const loc = self.locations.get(unif.lhs) orelse Loc{};
                             try self.allocDiag(loc, "expected function, got: {}", .{t});
-                            return error.TypeMistmatch;
+                            try self.setType(unif.lhs, .errored);
+                            return;
                         },
                     };
 
@@ -656,7 +663,7 @@ test "assignments" {
 
 test "fail: assignments" {
     try expectTypeCheckFail("a=b;", error.CouldNotFindVariable);
-    try expectTypeCheckFail("a=1;a=true;", error.Redefinition);
+    try expectTypeCheckFail("a=1;a=true;", error.TypeCheckFailed);
 }
 
 test "maths" {
@@ -670,6 +677,6 @@ test "maths" {
 }
 
 test "fail: maths" {
-    try expectTypeCheckFail("a=-true;", error.TypeMismatch);
-    try expectTypeCheckFail("a=1+true;", error.TypeMismatch);
+    try expectTypeCheckFail("a=-true;", error.TypeCheckFailed);
+    try expectTypeCheckFail("a=1+true;", error.TypeCheckFailed);
 }
