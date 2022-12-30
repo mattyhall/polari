@@ -72,6 +72,14 @@ pub const Expression = union(enum) {
                     .minus => "-",
                     .multiply => "*",
                     .divide => "/",
+                    .apply => {
+                        try writer.writeAll("(");
+                        try binop.lhs.inner.write(writer);
+                        try writer.writeAll(" ");
+                        try binop.rhs.inner.write(writer);
+                        try writer.writeAll(")");
+                        return;
+                    },
                 };
                 try writer.print("({s} ", .{op});
                 try binop.lhs.inner.write(writer);
@@ -119,7 +127,7 @@ pub const Expression = union(enum) {
 };
 
 /// BinaryOperation represents infix operators like '+', '-' etc.
-pub const BinaryOperation = enum { plus, minus, multiply, divide };
+pub const BinaryOperation = enum { plus, minus, multiply, divide, apply };
 
 /// UnaryOperation represents operators taking one argument, e.g. negation.
 pub const UnaryOperation = enum { negate, grouping };
@@ -208,6 +216,7 @@ fn infixBindingPower(op: BinaryOperation) struct { lhs: u8, rhs: u8 } {
         .plus => .{ .lhs = 70, .rhs = 71 },
         .multiply => .{ .lhs = 110, .rhs = 111 },
         .divide => .{ .lhs = 150, .rhs = 151 },
+        .apply => .{ .lhs = 240, .rhs = 241 },
     };
 }
 
@@ -432,11 +441,9 @@ pub const Parser = struct {
                 .asterisk => BinaryOperation.multiply,
                 .forward_slash => BinaryOperation.divide,
 
-                .semicolon => return lhs,
+                .semicolon, .right_paren, .in => return lhs,
 
-                .right_paren => return lhs,
-
-                .in => return lhs,
+                .identifier, .left_paren, .integer => .apply,
 
                 else => {
                     try self.allocDiag(
@@ -451,7 +458,7 @@ pub const Parser = struct {
             const power = infixBindingPower(op);
             if (power.lhs < min_bp) return lhs;
 
-            _ = self.pop() catch unreachable;
+            if (op != .apply) _ = self.pop() catch unreachable;
 
             const rhs = try self.parseExpression(power.rhs);
 
@@ -830,7 +837,7 @@ const Tests = struct {
         );
 
         try expectFailParse(
-            error.UnexpectedToken,
+            error.EndOfFile,
             &.{ .let, .{ .identifier = "a" }, .equals, .{ .integer = 1 }, .{ .identifier = "a" }, .semicolon },
         );
     }
@@ -865,6 +872,38 @@ const Tests = struct {
         try expectFailParse(
             error.UnexpectedToken,
             &.{ .@"fn", .{ .identifier = "a" }, .fat_arrow, .semicolon },
+        );
+    }
+
+    test "application" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParseExpr(
+            &.{
+                .{ .identifier = "f" },
+                .{ .identifier = "a" },
+                .{ .integer = 1 },
+                .plus,
+                .{ .integer = 2 },
+                .semicolon,
+            },
+            .{
+                .binop = .{
+                    .op = .plus,
+                    .lhs = locate(loc, try e(a, .{ .binop = .{
+                        .op = .apply,
+                        .lhs = locate(loc, try e(a, .{ .binop = .{
+                            .op = .apply,
+                            .lhs = locate(loc, try e(a, .{ .identifier = "f" })),
+                            .rhs = locate(loc, try e(a, .{ .identifier = "a" })),
+                        } })),
+                        .rhs = locate(loc, try e(a, .{ .integer = 1 })),
+                    } })),
+                    .rhs = locate(loc, try e(a, .{ .integer = 2 })),
+                },
+            },
         );
     }
 };

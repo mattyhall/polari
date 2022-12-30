@@ -77,6 +77,7 @@ fn DotWriter(comptime W: anytype) type {
                         .minus => "-",
                         .multiply => "*",
                         .divide => "/",
+                        .apply => "apply",
                     };
 
                     try self.w.print(

@@ -60,6 +60,7 @@ pub const Compiler = struct {
                     .minus => .subtract,
                     .multiply => .multiply,
                     .divide => .divide,
+                    .apply => @panic("unreachable"),
                 });
             },
             .unaryop => |unaryop| {

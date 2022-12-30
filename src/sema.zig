@@ -174,6 +174,7 @@ pub const Sema = struct {
                     .minus => "-",
                     .multiply => "*",
                     .divide => "/",
+                    .apply => @panic("unreachable"),
                 };
 
                 break :b Rule{ .apply = .{ .f = .{ .builtin = op }, .arguments = args } };
