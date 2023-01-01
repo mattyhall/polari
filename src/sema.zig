@@ -409,7 +409,44 @@ pub const Sema = struct {
                     v,
                 );
             },
-            .let => unreachable,
+            .let => |let| {
+                try self.var_maps.append(self.gpa, .{});
+
+                for (let.assignments) |ass| {
+                    if (self.currentVarMap().contains(ass.inner.identifier)) {
+                        try self.allocDiag(ass.loc, "redefinition of {s}", .{ass.inner.identifier});
+                        try self.setType(.{ .id = self.currentVarMap().get(ass.inner.identifier) orelse unreachable }, .errored);
+                        continue;
+                    }
+
+                    const ass_id = self.id();
+                    const ass_v = Variable{ .id = ass_id };
+                    try self.currentVarMap().put(self.gpa, ass.inner.identifier, ass_id);
+
+                    switch (ass.inner.expression.inner.*) {
+                        .integer => try self.types.put(self.gpa, ass_v, .int),
+                        .boolean => try self.types.put(self.gpa, ass_v, .bool),
+                        else => {
+                            try self.types.put(self.gpa, ass_v, .unknown);
+
+                            try self.generateRulesForExpression(ass.inner.expression.loc, ass.inner.expression.inner);
+                            try self.unifications.append(self.gpa, .{
+                                .lhs = .{ .id = ass_id },
+                                .rhs = .{ .variable = .{ .expr = ass.inner.expression.inner } },
+                            });
+                        },
+                    }
+                }
+
+                try self.generateRulesForExpression(let.in.loc, let.in.inner);
+                try self.unifications.append(self.gpa, .{
+                    .lhs = v,
+                    .rhs = .{ .variable = .{ .expr = let.in.inner } },
+                });
+
+                var map = self.var_maps.pop();
+                map.deinit(self.gpa);
+            },
             .function => unreachable,
             .apply => unreachable,
         }
@@ -679,4 +716,20 @@ test "maths" {
 test "fail: maths" {
     try expectTypeCheckFail("a=-true;", error.TypeCheckFailed);
     try expectTypeCheckFail("a=1+true;", error.TypeCheckFailed);
+}
+
+test "let..in" {
+    try expectTypesEqual("a = let x = 5; in x * 2; b = a + 1;", &.{
+        .{ .id = "a", .t = .int },
+        .{ .id = "b", .t = .int },
+    });
+
+    try expectTypesEqual("a = true; b = let a = false; in let a = 10; in a * 2;", &.{
+        .{ .id = "a", .t = .bool },
+        .{ .id = "b", .t = .int },
+    });
+}
+
+test "fail: let..in" {
+    try expectTypeCheckFail("a=1;b=let a=true; in a+2;", error.TypeCheckFailed);
 }
