@@ -128,8 +128,37 @@ const Type = union(enum) {
 
     pub fn eql(lhs: Type, rhs: Type) bool {
         if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
-        // FIXME: do we need equality for functions?
-        return lhs != .function and lhs != .unknown;
+        return switch (lhs) {
+            .int, .bool => true,
+            .errored => true,
+            .unknown => false,
+            .function => |f| b: {
+                const rhs_f = rhs.function;
+                if (f.params.len != rhs_f.params.len) break :b false;
+                for (f.params) |p, i| {
+                    if (!p.eql(rhs_f.params[i])) break :b false;
+                }
+
+                break :b f.ret.eql(rhs_f.ret.*);
+            },
+        };
+    }
+
+    pub fn clone(self: Type, gpa: std.mem.Allocator) !Type {
+        switch (self) {
+            .int, .bool, .unknown, .errored => return self,
+            .function => |f| {
+                var params = try gpa.alloc(Type, f.params.len);
+                errdefer gpa.free(params);
+                std.mem.copy(Type, params, f.params);
+
+                var ret = try gpa.create(Type);
+                errdefer gpa.destroy(ret);
+                ret.* = f.ret.*;
+
+                return .{ .function = .{ .params = params, .ret = ret } };
+            },
+        }
     }
 
     fn write(self: Type, writer: anytype) !void {
@@ -183,6 +212,8 @@ const Unification = struct { lhs: Variable, rhs: Rule };
 
 /// A rule is some way of finding a type given other variables.
 const Rule = union(enum) {
+    function: struct { params: []const Variable, ret: Variable },
+
     /// f is a function and we should have the same type as the parameter with index param.
     parameter: struct { param: u32, f: Variable },
 
@@ -194,6 +225,16 @@ const Rule = union(enum) {
 
     fn write(self: Rule, writer: anytype) !void {
         switch (self) {
+            .function => |f| {
+                try writer.writeAll("Function of [");
+                for (f.params) |param, i| {
+                    try param.write(writer);
+                    if (i < f.params.len - 1) try writer.writeAll(" ");
+                }
+
+                try writer.writeAll("] to ");
+                try f.ret.write(writer);
+            },
             .parameter => |p| {
                 try writer.print("Parameter {} of ", .{p.param});
                 try p.f.write(writer);
@@ -410,7 +451,8 @@ pub const Sema = struct {
                 );
             },
             .let => |let| {
-                try self.var_maps.append(self.gpa, .{});
+                try self.beginScope();
+                defer self.endScope();
 
                 for (let.assignments) |ass| {
                     if (self.currentVarMap().contains(ass.inner.identifier)) {
@@ -443,11 +485,27 @@ pub const Sema = struct {
                     .lhs = v,
                     .rhs = .{ .variable = .{ .expr = let.in.inner } },
                 });
-
-                var map = self.var_maps.pop();
-                map.deinit(self.gpa);
             },
-            .function => unreachable,
+            .function => |f| {
+                try self.beginScope();
+                defer self.endScope();
+
+                var al = try std.ArrayListUnmanaged(Variable).initCapacity(self.gpa, f.params.len);
+                errdefer al.deinit(self.gpa);
+
+                for (f.params) |param| {
+                    const param_id = self.id();
+                    try self.currentVarMap().put(self.gpa, param.inner.identifier, param_id);
+                    try self.types.put(self.gpa, .{ .id = param_id }, .unknown);
+                    al.appendAssumeCapacity(.{ .id = param_id });
+                }
+
+                try self.generateRulesForExpression(f.body.loc, f.body.inner);
+                try self.unifications.append(self.gpa, .{ .lhs = v, .rhs = .{ .function = .{
+                    .params = try al.toOwnedSlice(self.gpa),
+                    .ret = .{ .expr = f.body.inner },
+                } } });
+            },
             .apply => unreachable,
         }
     }
@@ -522,6 +580,35 @@ pub const Sema = struct {
         self.made_progress = true;
     }
 
+    fn beginScope(self: *Sema) !void {
+        try self.var_maps.append(self.gpa, .{});
+    }
+
+    fn endScope(self: *Sema) void {
+        var map = self.var_maps.pop();
+        defer map.deinit(self.gpa);
+
+        if (self.debug) {
+            var w = std.io.getStdErr().writer();
+            var it = map.iterator();
+            w.writeAll("======================\n") catch unreachable;
+            while (it.next()) |entry| {
+                w.print("{s} => <{}>\n", .{ entry.key_ptr.*, entry.value_ptr.* }) catch unreachable;
+            }
+        }
+    }
+
+    fn unifyVariables(self: *Sema, a: Variable, b: Variable) !bool {
+        const t = self.types.get(b) orelse unreachable;
+        switch (t) {
+            .unknown => return false,
+            else => {
+                try self.setType(a, try t.clone(self.gpa));
+                return true;
+            },
+        }
+    }
+
     pub fn solveIter(self: *Sema) !void {
         var i: usize = 0;
         while (i < self.unifications.items.len) {
@@ -530,15 +617,36 @@ pub const Sema = struct {
 
             switch (unif.rhs) {
                 .variable => |v| {
-                    const t = self.types.get(v) orelse unreachable;
-                    switch (t) {
-                        .unknown => continue,
-                        else => {
-                            try self.setType(unif.lhs, t);
-                            i -= 1;
-                            _ = self.unifications.swapRemove(i);
-                        },
+                    if (!try self.unifyVariables(unif.lhs, v) and !try self.unifyVariables(v, unif.lhs)) continue;
+                    i -= 1;
+                    _ = self.unifications.swapRemove(i);
+                },
+                .function => |f| b: {
+                    var al = std.ArrayListUnmanaged(Type){};
+                    errdefer al.deinit(self.gpa);
+
+                    for (f.params) |param| {
+                        const t = self.types.get(param) orelse unreachable;
+                        switch (t) {
+                            .unknown => break :b,
+                            else => try al.append(self.gpa, t),
+                        }
                     }
+
+                    const t = self.types.get(f.ret) orelse unreachable;
+                    if (t == .unknown or t == .errored) break :b;
+
+                    var t_allocced = try self.gpa.create(Type);
+                    errdefer self.gpa.destroy(t_allocced);
+                    t_allocced.* = t;
+
+                    try self.setType(unif.lhs, .{
+                        .function = .{ .params = try al.toOwnedSlice(self.gpa), .ret = t_allocced },
+                    });
+
+                    self.gpa.free(f.params);
+                    i -= 1;
+                    _ = self.unifications.swapRemove(i);
                 },
                 .parameter => |p| {
                     const t = switch (self.types.get(p.f) orelse unreachable) {
@@ -732,4 +840,30 @@ test "let..in" {
 
 test "fail: let..in" {
     try expectTypeCheckFail("a=1;b=let a=true; in a+2;", error.TypeCheckFailed);
+}
+
+fn allocParams(params: []const Type) ![]const Type {
+    var p = try testing.allocator.alloc(Type, params.len);
+    std.mem.copy(Type, p, params);
+    return p;
+}
+
+test "functions" {
+    var int: Type = .int;
+
+    var param = try allocParams(&.{.int});
+    defer testing.allocator.free(param);
+    var params = try allocParams(&.{ .int, .int });
+    defer testing.allocator.free(params);
+
+    try expectTypesEqual("f = fn x => -x;g = fn x y => x + y;", &.{
+        .{ .id = "f", .t = .{ .function = .{
+            .params = param,
+            .ret = &int,
+        } } },
+        .{ .id = "g", .t = .{ .function = .{
+            .params = params,
+            .ret = &int,
+        } } },
+    });
 }
