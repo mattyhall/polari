@@ -79,6 +79,127 @@ fn normaliseExpression(arena: std.mem.Allocator, expr: *parser.Expression) error
     }
 }
 
+fn getIdentifiers(a: std.mem.Allocator, expr: *Expression, deps: *std.ArrayListUnmanaged([]const u8)) !void {
+    switch (expr.*) {
+        .integer, .boolean => {},
+        .identifier => |i| try deps.append(a, i),
+        .unaryop => |unaryop| try getIdentifiers(a, unaryop.e.inner, deps),
+        .binop => |binop| {
+            try getIdentifiers(a, binop.lhs.inner, deps);
+            try getIdentifiers(a, binop.rhs.inner, deps);
+        },
+        .apply => |apply| {
+            try getIdentifiers(a, apply.f.inner, deps);
+            for (apply.args) |arg| try getIdentifiers(a, arg.inner, deps);
+        },
+        // FIXME: not implementing these yet as they require knowledge of scopes
+        .let, .function => return,
+    }
+}
+
+/// reorder puts the statements in program into a standard order: assignments first, expressions after. The assignments
+/// are also reordered within themselves so that variables are assigned before they are used. If this cannot be done
+/// (i.e. there are cyclical dependencies) then we return error.Cycle.
+fn reorder(program: *parser.Program) !void {
+    // Start by sorting so that assignments are first, expressions are after.
+    std.sort.sort(Located(parser.Statement), program.stmts.items, {}, struct {
+        fn lt(_: void, lhs: Located(parser.Statement), rhs: Located(parser.Statement)) bool {
+            if (lhs.inner == .assignment and rhs.inner == .expression) return true;
+            return false;
+        }
+    }.lt);
+
+    var arena = std.heap.ArenaAllocator.init(program.arena.child_allocator);
+    defer arena.deinit();
+    var a = arena.allocator();
+
+    // To reorder the assignments we build a graph. A node is an identifier and there is a directed edge between a and
+    // b iff a depends on b.
+
+    // We have an additional datastructure: a map from identifier to an index in the nodes array. This is done so
+    // we can build the dependencies with just the identifier name, but then look up the assignment it corresponds to
+    // later.
+    var map = std.StringHashMapUnmanaged(usize){};
+    defer map.deinit(a);
+
+    const Node = struct {
+        ident: []const u8,
+        expr: *Expression,
+        deps: [][]const u8,
+        processed: bool,
+        index: usize,
+    };
+    var nodes = std.ArrayListUnmanaged(Node){};
+    defer nodes.deinit(a);
+
+    for (program.stmts.items) |stmt, i| {
+        if (stmt.inner == .expression) break;
+
+        if (map.contains(stmt.inner.assignment.identifier)) return;
+
+        try map.put(a, stmt.inner.assignment.identifier, i);
+    }
+
+    for (program.stmts.items) |stmt, i| {
+        if (stmt.inner == .expression) break;
+
+        var deps = std.ArrayListUnmanaged([]const u8){};
+        errdefer deps.deinit(a);
+
+        try getIdentifiers(a, stmt.inner.assignment.expression.inner, &deps);
+        try nodes.append(a, .{
+            .ident = stmt.inner.assignment.identifier,
+            .expr = stmt.inner.assignment.expression.inner,
+            .deps = try deps.toOwnedSlice(a),
+            .processed = false,
+            .index = i,
+        });
+    }
+
+    // We then reorder. We keep looping through the nodes, skipping ones that have been processed. If a node has no
+    // dependencies or all its dependencies have been processed then we can "emit" the assignment (i.e. put it at the
+    // front of statements). Once we stop making any progress we need to check that we actually processed every node.
+    var made_progress = true;
+    var reorder_index: usize = 0;
+    while (made_progress) {
+        made_progress = false;
+        for (nodes.items) |*node| {
+            if (node.processed) continue;
+
+            var all_deps_processed = true;
+            for (node.deps) |dep| {
+                const index = map.get(dep) orelse return;
+                if (!nodes.items[index].processed) {
+                    all_deps_processed = false;
+                    break;
+                }
+            }
+
+            if (!all_deps_processed) continue;
+
+            made_progress = true;
+
+            const tmp = program.stmts.items[reorder_index];
+            const tmp_node_index = map.get(tmp.inner.assignment.identifier) orelse return;
+            const tmp_node = &nodes.items[tmp_node_index];
+            std.debug.assert(tmp_node.index == reorder_index);
+
+            program.stmts.items[reorder_index] = program.stmts.items[node.index];
+            program.stmts.items[node.index] = tmp;
+
+            tmp_node.index = node.index;
+            node.index = reorder_index;
+
+            node.processed = true;
+            reorder_index += 1;
+        }
+    }
+
+    for (nodes.items) |node| {
+        if (!node.processed) return error.Cycle;
+    }
+}
+
 /// normaliseProgram normalises an AST into a standard, simpler form than that which comes out of the parser. Currently
 /// it just changes chains of apply binops into a single Apply expression.
 pub fn normaliseProgram(program: *parser.Program) !void {
@@ -88,6 +209,8 @@ pub fn normaliseProgram(program: *parser.Program) !void {
             .expression => |e| try normaliseExpression(program.arena.allocator(), e),
         }
     }
+
+    try reorder(program);
 }
 
 fn hashFn(comptime Context: type) (fn (Context, Variable) u64) {
@@ -855,6 +978,44 @@ fn expectTypeCheckFail(source: []const u8, err: anyerror) !void {
     };
 
     return error.TestExpectError;
+}
+
+fn testNormalised(source: []const u8, expected: []const u8) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
+
+    var p = parser.Parser.init(testing.allocator, l);
+    defer p.deinit();
+
+    var program = try p.parse();
+    defer program.deinit();
+
+    try normaliseProgram(&program);
+
+    var al = std.ArrayList(u8).init(testing.allocator);
+    defer al.deinit();
+    var w = al.writer();
+
+    for (program.stmts.items) |stmt| {
+        try stmt.inner.write(w);
+    }
+
+    try testing.expectEqualStrings(expected, al.items);
+}
+
+test "reorder expressions and assignments" {
+    try testNormalised("1; a = 1;",
+        \\a = 1;
+        \\1;
+        \\
+    );
+}
+
+test "reorder assignments" {
+    try testNormalised("a = b; b = 1;",
+        \\b = 1;
+        \\a = b;
+        \\
+    );
 }
 
 test "assignments" {

@@ -146,6 +146,8 @@ pub const Chunk = struct {
 
     /// getLocal returns the local with name, if it exists.
     pub fn getLocal(self: *Chunk, name: []const u8) ?u32 {
+        if (self.locals.items.len == 0) return null;
+
         var i = self.locals.items.len - 1;
         while (true) : (i -= 1) {
             const l = self.locals.items[i];

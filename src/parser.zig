@@ -166,6 +166,17 @@ pub const Assignment = struct {
 pub const Statement = union(enum) {
     assignment: Assignment,
     expression: *Expression,
+
+    pub fn write(self: Statement, w: anytype) !void {
+        switch (self) {
+            .expression => |e| try e.write(w),
+            .assignment => |ass| {
+                try w.print("{s} = ", .{ass.identifier});
+                try ass.expression.inner.write(w);
+            },
+        }
+        try w.writeAll(";\n");
+    }
 };
 
 /// Located wraps T in a struct with a Loc.
