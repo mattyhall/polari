@@ -212,7 +212,11 @@ const Unification = struct { lhs: Variable, rhs: Rule };
 
 /// A rule is some way of finding a type given other variables.
 const Rule = union(enum) {
+    /// function gives the parameters and return type of a function.
     function: struct { params: []const Variable, ret: Variable },
+
+    /// number_of_params means the function f must have n parameters.
+    number_of_params: struct { f: Variable, n: u32, loc: Loc },
 
     /// f is a function and we should have the same type as the parameter with index param.
     parameter: struct { param: u32, f: Variable },
@@ -234,6 +238,11 @@ const Rule = union(enum) {
 
                 try writer.writeAll("] to ");
                 try f.ret.write(writer);
+            },
+            .number_of_params => |n| {
+                try writer.writeAll("Function ");
+                try n.f.write(writer);
+                try writer.print(" must have {} parameter(s)", .{n.n});
             },
             .parameter => |p| {
                 try writer.print("Parameter {} of ", .{p.param});
@@ -373,8 +382,13 @@ pub const Sema = struct {
         }
     }
 
-    fn generateRulesForApply(self: *Sema, f: Variable, args: []const Variable, expr: Variable) !void {
-        try self.unifications.ensureUnusedCapacity(self.gpa, 1 + args.len);
+    fn generateRulesForApply(self: *Sema, f: Variable, args: []const Variable, expr: Variable, loc: Loc) !void {
+        try self.unifications.ensureUnusedCapacity(self.gpa, 2 + args.len);
+
+        self.unifications.appendAssumeCapacity(.{
+            .lhs = expr,
+            .rhs = .{ .number_of_params = .{ .f = f, .n = @intCast(u32, args.len), .loc = loc } },
+        });
 
         self.unifications.appendAssumeCapacity(.{ .lhs = expr, .rhs = .{ .ret = f } });
 
@@ -429,6 +443,7 @@ pub const Sema = struct {
                         .{ .id = negateId },
                         &[_]Variable{.{ .expr = unaryop.e.inner }},
                         v,
+                        loc,
                     ),
                 }
             },
@@ -448,6 +463,7 @@ pub const Sema = struct {
                     .{ .id = op_id },
                     &[_]Variable{ .{ .expr = binop.lhs.inner }, .{ .expr = binop.rhs.inner } },
                     v,
+                    loc,
                 );
             },
             .let => |let| {
@@ -517,7 +533,7 @@ pub const Sema = struct {
                     try self.generateRulesForExpression(arg.loc, arg.inner);
                 }
 
-                try self.generateRulesForApply(.{ .expr = a.f.inner }, args, v);
+                try self.generateRulesForApply(.{ .expr = a.f.inner }, args, v, loc);
             },
         }
     }
@@ -662,6 +678,30 @@ pub const Sema = struct {
                     self.gpa.free(f.params);
                     i -= 1;
                     _ = self.unifications.swapRemove(i);
+                },
+                .number_of_params => |n| {
+                    const t = switch (self.types.get(n.f) orelse unreachable) {
+                        .unknown => continue,
+                        .function => |f| f,
+                        else => |t| {
+                            const loc = self.locations.get(unif.lhs) orelse Loc{};
+                            try self.allocDiag(loc, "expected function, got: {}", .{t});
+                            try self.setType(unif.lhs, .errored);
+                            return;
+                        },
+                    };
+
+                    if (t.params.len != n.n) {
+                        try self.allocDiag(
+                            n.loc,
+                            "function expects {} arguments, got {}",
+                            .{ t.params.len, n.n },
+                        );
+                        try self.setType(unif.lhs, .errored);
+                        i -= 1;
+                        _ = self.unifications.swapRemove(i);
+                        return;
+                    }
                 },
                 .parameter => |p| {
                     const t = switch (self.types.get(p.f) orelse unreachable) {
@@ -913,4 +953,5 @@ test "function calls" {
 
 test "fail: function calls" {
     try expectTypeCheckFail("f = fn x => -x;a = f true;", error.TypeCheckFailed);
+    try expectTypeCheckFail("f = fn x y => x + y;a = f 1;", error.TypeCheckFailed);
 }
