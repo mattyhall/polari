@@ -506,7 +506,19 @@ pub const Sema = struct {
                     .ret = .{ .expr = f.body.inner },
                 } } });
             },
-            .apply => unreachable,
+            .apply => |a| {
+                try self.generateRulesForExpression(a.f.loc, a.f.inner);
+
+                var args = try self.gpa.alloc(Variable, a.args.len);
+                defer self.gpa.free(args);
+
+                for (a.args) |arg, i| {
+                    args[i] = .{ .expr = arg.inner };
+                    try self.generateRulesForExpression(arg.loc, arg.inner);
+                }
+
+                try self.generateRulesForApply(.{ .expr = a.f.inner }, args, v);
+            },
         }
     }
 
@@ -756,6 +768,8 @@ fn expectTypesEqual(source: []const u8, expected: []const struct { id: []const u
     var program = try p.parse();
     defer program.deinit();
 
+    try normaliseProgram(&program);
+
     var sema = Sema.init(testing.allocator, false);
     defer sema.deinit();
 
@@ -868,5 +882,29 @@ test "functions" {
             .params = params,
             .ret = &int,
         } } },
+    });
+}
+test "function calls" {
+    var int: Type = .int;
+
+    var param = try allocParams(&.{.int});
+    defer testing.allocator.free(param);
+    var params = try allocParams(&.{ .int, .int });
+    defer testing.allocator.free(params);
+
+    try expectTypesEqual("f = fn x => -x;a = f 1;", &.{
+        .{ .id = "f", .t = .{ .function = .{
+            .params = param,
+            .ret = &int,
+        } } },
+        .{ .id = "a", .t = .int },
+    });
+
+    try expectTypesEqual("f = fn x y => x + y;a = f 1 2;", &.{
+        .{ .id = "f", .t = .{ .function = .{
+            .params = params,
+            .ret = &int,
+        } } },
+        .{ .id = "a", .t = .int },
     });
 }
