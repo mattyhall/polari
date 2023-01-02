@@ -795,6 +795,8 @@ fn expectTypeCheckFail(source: []const u8, err: anyerror) !void {
     var program = try p.parse();
     defer program.deinit();
 
+    try normaliseProgram(&program);
+
     var sema = Sema.init(testing.allocator, false);
     defer sema.deinit();
 
@@ -907,4 +909,8 @@ test "function calls" {
         } } },
         .{ .id = "a", .t = .int },
     });
+}
+
+test "fail: function calls" {
+    try expectTypeCheckFail("f = fn x => -x;a = f true;", error.TypeCheckFailed);
 }

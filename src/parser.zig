@@ -462,7 +462,7 @@ pub const Parser = struct {
 
                 .semicolon, .right_paren, .in => return lhs,
 
-                .identifier, .left_paren, .integer => .apply,
+                .identifier, .left_paren, .integer, .true, .false => .apply,
 
                 else => {
                     try self.allocDiag(
@@ -898,6 +898,15 @@ const Tests = struct {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         var a = arena.allocator();
+
+        try expectEqualParseExpr(
+            &.{ .{ .identifier = "f" }, .true, .semicolon },
+            .{ .binop = .{
+                .op = .apply,
+                .lhs = locate(loc, try e(a, .{ .identifier = "f" })),
+                .rhs = locate(loc, try e(a, .{ .boolean = true })),
+            } },
+        );
 
         try expectEqualParseExpr(
             &.{
