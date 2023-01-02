@@ -79,21 +79,51 @@ fn normaliseExpression(arena: std.mem.Allocator, expr: *parser.Expression) error
     }
 }
 
-fn getIdentifiers(a: std.mem.Allocator, expr: *Expression, deps: *std.ArrayListUnmanaged([]const u8)) !void {
+/// getIdentifiers finds all the indentifiers in expr and adds them to deps. This may include duplicates.
+/// It will not add any identifiers in ignore to deps.
+fn getIdentifiers(
+    a: std.mem.Allocator,
+    expr: *Expression,
+    deps: *std.ArrayListUnmanaged([]const u8),
+    ignore: *std.ArrayListUnmanaged([]const u8),
+) !void {
     switch (expr.*) {
         .integer, .boolean => {},
-        .identifier => |i| try deps.append(a, i),
-        .unaryop => |unaryop| try getIdentifiers(a, unaryop.e.inner, deps),
+        .identifier => |i| {
+            var found = false;
+            for (ignore.items) |item| {
+                if (std.mem.eql(u8, i, item)) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) try deps.append(a, i);
+        },
+        .unaryop => |unaryop| try getIdentifiers(a, unaryop.e.inner, deps, ignore),
         .binop => |binop| {
-            try getIdentifiers(a, binop.lhs.inner, deps);
-            try getIdentifiers(a, binop.rhs.inner, deps);
+            try getIdentifiers(a, binop.lhs.inner, deps, ignore);
+            try getIdentifiers(a, binop.rhs.inner, deps, ignore);
         },
         .apply => |apply| {
-            try getIdentifiers(a, apply.f.inner, deps);
-            for (apply.args) |arg| try getIdentifiers(a, arg.inner, deps);
+            try getIdentifiers(a, apply.f.inner, deps, ignore);
+            for (apply.args) |arg| try getIdentifiers(a, arg.inner, deps, ignore);
         },
-        // FIXME: not implementing these yet as they require knowledge of scopes
-        .let, .function => return,
+        .let => |let| {
+            for (let.assignments) |ass| {
+                try ignore.append(a, ass.inner.identifier);
+                try getIdentifiers(a, ass.inner.expression.inner, deps, ignore);
+            }
+
+            try getIdentifiers(a, let.in.inner, deps, ignore);
+            ignore.shrinkRetainingCapacity(let.assignments.len);
+        },
+        .function => |f| {
+            for (f.params) |param| try ignore.append(a, param.inner.identifier);
+
+            try getIdentifiers(a, f.body.inner, deps, ignore);
+            ignore.shrinkRetainingCapacity(f.params.len);
+        },
     }
 }
 
@@ -145,8 +175,10 @@ fn reorder(program: *parser.Program) !void {
 
         var deps = std.ArrayListUnmanaged([]const u8){};
         errdefer deps.deinit(a);
+        var ignore = std.ArrayListUnmanaged([]const u8){};
+        errdefer ignore.deinit(a);
 
-        try getIdentifiers(a, stmt.inner.assignment.expression.inner, &deps);
+        try getIdentifiers(a, stmt.inner.assignment.expression.inner, &deps, &ignore);
         try nodes.append(a, .{
             .ident = stmt.inner.assignment.identifier,
             .expr = stmt.inner.assignment.expression.inner,
@@ -201,7 +233,8 @@ fn reorder(program: *parser.Program) !void {
 }
 
 /// normaliseProgram normalises an AST into a standard, simpler form than that which comes out of the parser. Currently
-/// it just changes chains of apply binops into a single Apply expression.
+/// it just chains of apply binops into a single Apply expression and reorders assignments so that variables are
+/// declared before they are used.
 pub fn normaliseProgram(program: *parser.Program) !void {
     for (program.stmts.items) |stmt| {
         switch (stmt.inner) {
@@ -1014,6 +1047,17 @@ test "reorder assignments" {
     try testNormalised("a = b; b = 1;",
         \\b = 1;
         \\a = b;
+        \\
+    );
+
+    try testNormalised("a = let b = 10; in b+2; b = 1;",
+        \\a = (let [b=10;] (+ b 2));
+        \\b = 1;
+        \\
+    );
+    try testNormalised("a = fn x y => x + y; x = 10;",
+        \\a = (fn [x y] (+ x y));
+        \\x = 10;
         \\
     );
 }
