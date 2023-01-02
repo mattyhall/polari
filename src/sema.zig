@@ -580,10 +580,12 @@ pub const Sema = struct {
         self.made_progress = true;
     }
 
+    /// beginScope adds a new VarMap to the var_maps array. This is so we can do shadowing.
     fn beginScope(self: *Sema) !void {
         try self.var_maps.append(self.gpa, .{});
     }
 
+    /// endScope removes and frees the last VarMap in var_maps. If debug mode is on it also dumps the VarMap to stderr.
     fn endScope(self: *Sema) void {
         var map = self.var_maps.pop();
         defer map.deinit(self.gpa);
@@ -598,6 +600,7 @@ pub const Sema = struct {
         }
     }
 
+    /// unifyVariables sets the type of a to the type of be if b is resolved.
     fn unifyVariables(self: *Sema, a: Variable, b: Variable) !bool {
         const t = self.types.get(b) orelse unreachable;
         switch (t) {
