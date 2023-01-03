@@ -305,7 +305,7 @@ pub fn main() !void {
 
     if (opts.args.@"dump-bytecode") {
         var w = std.io.getStdOut().writer();
-        try c.chunk.diassemble(w);
+        try c.chunk.disassemble(w);
     }
 
     var machine = vm.Vm.init(gpa.allocator(), c.chunk);

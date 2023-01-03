@@ -15,11 +15,20 @@ pub const Locals = std.ArrayListUnmanaged(Local);
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
+    function: struct { chunk: Chunk, arity: u32, name: []const u8 },
 
     pub fn print(self: Value, w: anytype) !void {
         switch (self) {
             .integer => |i| try w.print("{}", .{i}),
             .boolean => |b| try w.print("{}", .{b}),
+            .function => |f| try w.print("<func {s}>", .{f.name}),
+        }
+    }
+
+    pub fn deinit(self: *Value) void {
+        switch (self.*) {
+            .function => |*f| f.chunk.deinit(),
+            else => {},
         }
     }
 };
@@ -58,6 +67,11 @@ pub const Op = enum(u8) {
     /// stack.
     divide,
 
+    /// CALL: calls the function last on the stack.
+    call,
+    /// RET: return from function
+    ret,
+
     // NEG: negates the last value on the stack and pushes the result onto the stack.
     negate,
 
@@ -80,6 +94,8 @@ pub const Op = enum(u8) {
             .multiply => .{ .op = "MULT", .rest = "" },
             .divide => .{ .op = "DIV", .rest = "" },
             .negate => .{ .op = "NEG", .rest = "" },
+            .call => .{ .op = "CALL", .rest = "" },
+            .ret => .{ .op = "RET", .rest = "" },
             .rare => return,
         };
 
@@ -224,7 +240,16 @@ pub const Chunk = struct {
     }
 
     /// disassemble writes the disassembled output of the chunk to writer.
-    pub fn diassemble(self: *const Chunk, writer: anytype) !void {
+    pub fn disassemble(self: *const Chunk, writer: anytype) !void {
+        for (self.constants.items) |v| switch (v) {
+            .function => |f| {
+                try writer.print("============ {s} ============\n", .{f.name});
+                try f.chunk.disassemble(writer);
+                try writer.writeAll("============================\n");
+            },
+            else => {},
+        };
+
         var i: u32 = 0;
         while (i < self.code.items.len) : (i += 1) {
             const op = try std.meta.intToEnum(Op, self.code.items[i]);
@@ -242,7 +267,7 @@ pub const Chunk = struct {
                     try writer.print("{x:<4}", .{arg});
                 },
                 .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide, .negate => try op.print(writer),
-                .popl => try op.print(writer),
+                .popl, .call, .ret => try op.print(writer),
                 .rare => {
                     i += 1;
                     try self.disassembleRare(&i, writer);
@@ -255,7 +280,10 @@ pub const Chunk = struct {
 
     pub fn deinit(self: *Chunk) void {
         self.locals.deinit(self.gpa);
+
+        for (self.constants.items) |*c| c.deinit();
         self.constants.deinit(self.gpa);
+
         self.code.deinit(self.gpa);
     }
 };
@@ -266,7 +294,7 @@ fn testDissassemble(chunk: *const Chunk, expected: []const u8) !void {
     var al = std.ArrayList(u8).init(testing.allocator);
     defer al.deinit();
 
-    try chunk.diassemble(al.writer());
+    try chunk.disassemble(al.writer());
 
     try testing.expectEqualStrings(expected, al.items);
 }

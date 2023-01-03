@@ -7,6 +7,8 @@ const Diag = lexer.Diag;
 
 pub const Parameter = union(enum) { identifier: []const u8 };
 
+pub const Function = struct { params: []Located(Parameter), body: Located(*Expression) };
+
 pub const Expression = union(enum) {
     integer: i64,
     boolean: bool,
@@ -14,7 +16,7 @@ pub const Expression = union(enum) {
     binop: struct { op: BinaryOperation, lhs: Located(*Expression), rhs: Located(*Expression) },
     unaryop: struct { op: UnaryOperation, e: Located(*Expression) },
     let: struct { assignments: []Located(Assignment), in: Located(*Expression) },
-    function: struct { params: []Located(Parameter), body: Located(*Expression) },
+    function: Function,
     apply: struct { f: Located(*Expression), args: []Located(*Expression) },
 
     pub fn eql(lhs: *const Expression, rhs: *const Expression) bool {

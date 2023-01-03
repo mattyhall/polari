@@ -94,6 +94,7 @@ pub const Vm = struct {
                     self.stack.appendAssumeCapacity(.{ .integer = arg.integer * -1 });
                 },
                 .rare => try self.runRare(),
+                .call, .ret => @panic("not implemented"),
             }
         }
     }

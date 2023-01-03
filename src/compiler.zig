@@ -86,11 +86,60 @@ pub const Compiler = struct {
                 self.chunk.popLocals(@intCast(u32, locals));
                 while (locals > 0) : (locals -= std.math.maxInt(u8)) {
                     try self.chunk.writeOp(.popl_n);
-                    try self.chunk.writeU8(@intCast(u8, std.math.max(std.math.maxInt(u8), locals)));
+                    try self.chunk.writeU8(@intCast(u8, std.math.min(std.math.maxInt(u8), locals)));
                 }
             },
-            .function, .apply => @panic("not implemented"),
+            .function => |f| {
+                var comp = Compiler{
+                    .gpa = self.gpa,
+                    .chunk = bc.Chunk.init(self.gpa),
+                    .program = undefined,
+                };
+
+                comp.chunk.locals = try self.chunk.locals.clone(self.gpa);
+
+                var func = try comp.compileFunction("", &f);
+                const c = try self.chunk.addConstant(func);
+                try self.writeConst(c);
+            },
+            .apply => @panic("not implemented"),
         }
+    }
+
+    fn compileFunction(self: *Compiler, name: []const u8, f: *const parser.Function) error{OutOfMemory}!bc.Value {
+        // The rightmost argument is at the top of the stack which means we need to assign locals in reverse order.
+        var i: usize = f.params.len - 1;
+        var current: u32 = undefined;
+        while (true) {
+            const param = f.params[i];
+            const l = try self.chunk.addLocal(param.inner.identifier);
+            if (i == 0) {
+                current = l;
+                break;
+            }
+            i -= 1;
+        }
+
+        for (f.params) |_| {
+            try self.writeLocal(.set, current);
+            current -= 1;
+        }
+
+        try self.compileExpression(f.body.inner);
+
+        var locals = @intCast(isize, f.params.len);
+        if (locals == 1) {
+            try self.chunk.writeOp(.popl);
+        } else {
+            while (locals > 0) : (locals -= std.math.maxInt(u8)) {
+                try self.chunk.writeOp(.popl_n);
+                try self.chunk.writeU8(@intCast(u8, std.math.min(std.math.maxInt(u8), locals)));
+            }
+        }
+
+        try self.chunk.writeOp(.ret);
+
+        return bc.Value{ .function = .{ .chunk = self.chunk, .arity = @intCast(u32, f.params.len), .name = name } };
     }
 
     pub fn compile(self: *Compiler) !void {
@@ -130,7 +179,7 @@ fn testCompile(source: []const u8, disassembly: []const u8) !void {
     var al = std.ArrayList(u8).init(testing.allocator);
     defer al.deinit();
 
-    try c.chunk.diassemble(al.writer());
+    try c.chunk.disassemble(al.writer());
 
     try std.testing.expectEqualStrings(disassembly, al.items);
 }
@@ -186,6 +235,25 @@ test "let..in" {
         \\CONST  c1    ; 2
         \\ADD   
         \\POPL  
+        \\SET    l1   
+        \\
+    );
+}
+
+test "function" {
+    try testCompile("a = 1; f = fn x y => x + y;",
+        \\============  ============
+        \\SET    l2   
+        \\SET    l1   
+        \\GET    l2   
+        \\GET    l1   
+        \\ADD   
+        \\POPLN   2   
+        \\RET   
+        \\============================
+        \\ONE   
+        \\SET    l0   
+        \\CONST  c0    ; <func >
         \\SET    l1   
         \\
     );
