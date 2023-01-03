@@ -67,7 +67,10 @@ pub const Op = enum(u8) {
     /// stack.
     divide,
 
-    /// CALL: calls the function last on the stack.
+    /// CALL n: calls the function n values down on the stack.
+    ///
+    /// NOTE: n is the number of arguments. The arguments come in left to right order on the stack, after the function
+    /// to call.
     call,
     /// RET: return from function
     ret,
@@ -94,7 +97,7 @@ pub const Op = enum(u8) {
             .multiply => .{ .op = "MULT", .rest = "" },
             .divide => .{ .op = "DIV", .rest = "" },
             .negate => .{ .op = "NEG", .rest = "" },
-            .call => .{ .op = "CALL", .rest = "" },
+            .call => .{ .op = "CALL", .rest = "  " },
             .ret => .{ .op = "RET", .rest = "" },
             .rare => return,
         };
@@ -261,13 +264,13 @@ pub const Chunk = struct {
 
                     try self.constants.items[arg].print(writer);
                 },
-                .popl_n, .get8, .set8 => {
+                .popl_n, .get8, .set8, .call => {
                     const arg = try self.next(&i);
                     try op.print(writer);
                     try writer.print("{x:<4}", .{arg});
                 },
                 .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide, .negate => try op.print(writer),
-                .popl, .call, .ret => try op.print(writer),
+                .popl, .ret => try op.print(writer),
                 .rare => {
                     i += 1;
                     try self.disassembleRare(&i, writer);

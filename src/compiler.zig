@@ -102,7 +102,12 @@ pub const Compiler = struct {
                 const c = try self.chunk.addConstant(func);
                 try self.writeConst(c);
             },
-            .apply => @panic("not implemented"),
+            .apply => |a| {
+                try self.compileExpression(a.f.inner);
+                for (a.args) |arg| try self.compileExpression(arg.inner);
+                try self.chunk.writeOp(.call);
+                try self.chunk.writeU8(@intCast(u8, a.args.len));
+            },
         }
     }
 
@@ -170,6 +175,8 @@ fn testCompile(source: []const u8, disassembly: []const u8) !void {
 
     var program = try p.parse();
     defer program.deinit();
+
+    try sema.normaliseProgram(&program);
 
     var c = Compiler.init(testing.allocator, &program);
     defer c.deinit();
@@ -241,7 +248,7 @@ test "let..in" {
 }
 
 test "function" {
-    try testCompile("a = 1; f = fn x y => x + y;",
+    try testCompile("a = 1; f = fn x y => x + y; b = f 1 1;",
         \\============  ============
         \\SET    l2   
         \\SET    l1   
@@ -255,6 +262,11 @@ test "function" {
         \\SET    l0   
         \\CONST  c0    ; <func >
         \\SET    l1   
+        \\GET    l1   
+        \\ONE   
+        \\ONE   
+        \\CALL    2   
+        \\SET    l2   
         \\
     );
 }
