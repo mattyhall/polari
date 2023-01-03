@@ -14,6 +14,7 @@ pub const Opts = struct {
     @"dump-normalised-ast": bool = false,
     @"dump-type-checking": bool = false,
     @"dump-bytecode": bool = false,
+    @"debug-vm": bool = false,
 };
 
 fn readStdin(gpa: std.mem.Allocator) ![]const u8 {
@@ -308,9 +309,10 @@ pub fn main() !void {
         try c.chunk.disassemble(w);
     }
 
-    var machine = vm.Vm.init(gpa.allocator(), c.chunk);
+    var machine = vm.Vm.init(gpa.allocator(), &c.chunk);
     defer machine.deinit();
 
+    machine.debug = opts.args.@"debug-vm";
     try machine.run();
 
     var w = std.io.getStdOut().writer();

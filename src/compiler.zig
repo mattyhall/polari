@@ -65,7 +65,7 @@ pub const Compiler = struct {
             },
             .unaryop => |unaryop| {
                 try self.compileExpression(unaryop.e.inner);
-                try self.chunk.writeOp(.negate);
+                if (unaryop.op == .negate) try self.chunk.writeOp(.negate);
             },
             .let => |let| {
                 for (let.assignments) |a| {
@@ -96,8 +96,6 @@ pub const Compiler = struct {
                     .program = undefined,
                 };
 
-                comp.chunk.locals = try self.chunk.locals.clone(self.gpa);
-
                 var func = try comp.compileFunction("", &f);
                 const c = try self.chunk.addConstant(func);
                 try self.writeConst(c);
@@ -113,20 +111,17 @@ pub const Compiler = struct {
 
     fn compileFunction(self: *Compiler, name: []const u8, f: *const parser.Function) error{OutOfMemory}!bc.Value {
         // The rightmost argument is at the top of the stack which means we need to assign locals in reverse order.
-        var i: usize = f.params.len - 1;
         var current: u32 = undefined;
-        while (true) {
-            const param = f.params[i];
+        for (f.params) |param| {
             const l = try self.chunk.addLocal(param.inner.identifier);
-            if (i == 0) {
-                current = l;
-                break;
-            }
-            i -= 1;
+            current = l;
         }
 
-        for (f.params) |_| {
+        var i: usize = f.params.len - 1;
+        while (true) {
             try self.writeLocal(.set, current);
+            if (i == 0) break;
+            i -= 1;
             current -= 1;
         }
 
@@ -250,9 +245,9 @@ test "let..in" {
 test "function" {
     try testCompile("a = 1; f = fn x y => x + y; b = f 1 1;",
         \\============  ============
-        \\SET    l2   
         \\SET    l1   
-        \\GET    l2   
+        \\SET    l0   
+        \\GET    l0   
         \\GET    l1   
         \\ADD   
         \\POPLN   2   
@@ -267,6 +262,28 @@ test "function" {
         \\ONE   
         \\CALL    2   
         \\SET    l2   
+        \\
+    );
+    try testCompile("f = fn x y => x + y; b = f 1 (f 2 3);",
+        \\============  ============
+        \\SET    l1   
+        \\SET    l0   
+        \\GET    l0   
+        \\GET    l1   
+        \\ADD   
+        \\POPLN   2   
+        \\RET   
+        \\============================
+        \\CONST  c0    ; <func >
+        \\SET    l0   
+        \\GET    l0   
+        \\ONE   
+        \\GET    l0   
+        \\CONST  c1    ; 2
+        \\CONST  c2    ; 3
+        \\CALL    2   
+        \\CALL    2   
+        \\SET    l1   
         \\
     );
 }

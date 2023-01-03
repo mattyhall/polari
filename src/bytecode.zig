@@ -67,16 +67,16 @@ pub const Op = enum(u8) {
     /// stack.
     divide,
 
+    // NEG: negates the last value on the stack and pushes the result onto the stack.
+    negate,
+
     /// CALL n: calls the function n values down on the stack.
     ///
     /// NOTE: n is the number of arguments. The arguments come in left to right order on the stack, after the function
     /// to call.
     call,
-    /// RET: return from function
+    /// RET: return from function, removing the function off the stack.
     ret,
-
-    // NEG: negates the last value on the stack and pushes the result onto the stack.
-    negate,
 
     /// RARE a: a is a RareOp.
     rare,
