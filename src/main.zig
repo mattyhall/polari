@@ -79,6 +79,12 @@ fn DotWriter(comptime W: anytype) type {
                         .multiply => "*",
                         .divide => "/",
                         .apply => "apply",
+                        .eq => "==",
+                        .neq => "!=",
+                        .lt => "<",
+                        .lte => "<=",
+                        .gt => ">",
+                        .gte => ">=",
                     };
 
                     try self.w.print(

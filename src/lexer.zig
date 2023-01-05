@@ -26,6 +26,12 @@ pub const Tok = union(enum) {
     minus,
     forward_slash,
     asterisk,
+    eq,
+    neq,
+    lt,
+    gt,
+    lte,
+    gte,
 
     semicolon,
     left_paren,
@@ -206,8 +212,43 @@ pub const Lexer = struct {
                         _ = self.pop() catch unreachable;
                         break :b .{ .tok = .fat_arrow, .loc = loc };
                     },
+                    '=' => b: {
+                        _ = self.pop() catch unreachable;
+                        break :b .{ .tok = .eq, .loc = loc };
+                    },
                     else => .{ .tok = .equals, .loc = loc },
                 };
+            },
+            '<' => {
+                const loc = self.loc;
+                _ = self.pop() catch unreachable;
+                const c2 = self.peek() catch return .{ .tok = .lt, .loc = loc };
+                return switch (c2) {
+                    '=' => b: {
+                        _ = self.pop() catch unreachable;
+                        break :b .{ .tok = .lte, .loc = loc };
+                    },
+                    else => .{ .tok = .lt, .loc = loc },
+                };
+            },
+            '>' => {
+                const loc = self.loc;
+                _ = self.pop() catch unreachable;
+                const c2 = self.peek() catch return .{ .tok = .gt, .loc = loc };
+                return switch (c2) {
+                    '=' => b: {
+                        _ = self.pop() catch unreachable;
+                        break :b .{ .tok = .gte, .loc = loc };
+                    },
+                    else => .{ .tok = .gt, .loc = loc },
+                };
+            },
+            '!' => {
+                const loc = self.loc;
+                _ = self.pop() catch unreachable;
+                const c2 = self.pop() catch return error.UnexpectedChar;
+                if (c2 != '=') return error.UnexpectedChar;
+                return .{ .loc = loc, .tok = .neq };
             },
             '+' => self.tokloc(.plus),
             '-' => self.tokloc(.minus),
@@ -335,6 +376,7 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
             .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => continue,
             .true, .false => continue,
+            .eq, .neq, .gt, .gte, .lt, .lte => continue,
         }
 
         std.debug.print("at index {}: expected {}, got {}\n", .{ i, item_expected, item_actual });
@@ -395,4 +437,8 @@ test "keywords" {
     try expectLex(testing.allocator, "let", &.{.let});
     try expectLex(testing.allocator, "in", &.{.in});
     try expectLex(testing.allocator, "if then elif else", &.{ .@"if", .then, .elif, .@"else" });
+}
+
+test "boolean logic" {
+    try expectLex(testing.allocator, "= == != > < >= <=", &.{ .equals, .eq, .neq, .gt, .lt, .gte, .lte });
 }

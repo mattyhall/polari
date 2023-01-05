@@ -445,7 +445,8 @@ pub const Sema = struct {
     const subId = 1;
     const multId = 2;
     const divId = 3;
-    const negateId = 4;
+    const cmpId = 4;
+    const negateId = 5;
 
     pub fn init(gpa: std.mem.Allocator, debug: bool) Sema {
         return .{
@@ -480,7 +481,7 @@ pub const Sema = struct {
     pub fn prepopulate(self: *Sema) error{OutOfMemory}!void {
         try self.var_maps.append(self.gpa, .{});
 
-        const ops = [_][]const u8{ "+", "-", "*", "/" };
+        const ops = [_][]const u8{ "+", "-", "*", "/", "<cmp>" };
 
         try self.types.ensureUnusedCapacity(self.gpa, ops.len);
         try self.currentVarMap().ensureUnusedCapacity(self.gpa, ops.len);
@@ -493,7 +494,7 @@ pub const Sema = struct {
 
             var ret = try self.gpa.create(Type);
             errdefer self.gpa.destroy(ret);
-            ret.* = .int;
+            ret.* = if (std.mem.eql(u8, "<cmp>", op)) .bool else .int;
 
             var t = .{ .function = .{ .ret = ret, .params = params } };
 
@@ -626,6 +627,7 @@ pub const Sema = struct {
                     .minus => subId,
                     .multiply => multId,
                     .divide => divId,
+                    .eq, .neq, .lt, .lte, .gt, .gte => cmpId,
                     .apply => @panic("not implemented"),
                 };
 
@@ -1130,6 +1132,20 @@ test "maths" {
 test "fail: maths" {
     try expectTypeCheckFail("a=-true;", error.TypeCheckFailed);
     try expectTypeCheckFail("a=1+true;", error.TypeCheckFailed);
+}
+
+test "boolean binops" {
+    try expectTypesEqual("a=5==5; b=6*2; c=b>18; d=8-2*2<=3;", &.{
+        .{ .id = "a", .t = .bool },
+        .{ .id = "b", .t = .int },
+        .{ .id = "c", .t = .bool },
+        .{ .id = "d", .t = .bool },
+    });
+}
+
+test "fail: boolean binops" {
+    try expectTypeCheckFail("1 == true;", error.TypeCheckFailed);
+    try expectTypeCheckFail("false == true;", error.TypeCheckFailed);
 }
 
 test "let..in" {

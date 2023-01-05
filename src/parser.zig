@@ -91,6 +91,12 @@ pub const Expression = union(enum) {
                     .minus => "-",
                     .multiply => "*",
                     .divide => "/",
+                    .eq => "==",
+                    .neq => "!=",
+                    .lt => "<",
+                    .lte => "<=",
+                    .gt => ">",
+                    .gte => ">=",
                     .apply => {
                         try writer.writeAll("(");
                         try binop.lhs.inner.write(writer);
@@ -164,7 +170,7 @@ pub const Expression = union(enum) {
 };
 
 /// BinaryOperation represents infix operators like '+', '-' etc.
-pub const BinaryOperation = enum { plus, minus, multiply, divide, apply };
+pub const BinaryOperation = enum { plus, minus, multiply, divide, apply, eq, neq, lt, lte, gt, gte };
 
 /// UnaryOperation represents operators taking one argument, e.g. negation.
 pub const UnaryOperation = enum { negate, grouping };
@@ -265,6 +271,12 @@ fn infixBindingPower(op: BinaryOperation) struct { lhs: u8, rhs: u8 } {
         .multiply => .{ .lhs = 110, .rhs = 111 },
         .divide => .{ .lhs = 150, .rhs = 151 },
         .apply => .{ .lhs = 240, .rhs = 241 },
+        .eq => .{ .lhs = 10, .rhs = 11 },
+        .neq => .{ .lhs = 10, .rhs = 11 },
+        .lt => .{ .lhs = 10, .rhs = 11 },
+        .lte => .{ .lhs = 10, .rhs = 11 },
+        .gt => .{ .lhs = 10, .rhs = 11 },
+        .gte => .{ .lhs = 10, .rhs = 11 },
     };
 }
 
@@ -320,6 +332,7 @@ pub const Parser = struct {
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
             .true, .false => {},
             .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => {},
+            .eq, .neq, .gt, .gte, .lt, .lte => {},
         }
 
         const tokloc = try self.pop();
@@ -520,6 +533,12 @@ pub const Parser = struct {
                 .minus => BinaryOperation.minus,
                 .asterisk => BinaryOperation.multiply,
                 .forward_slash => BinaryOperation.divide,
+                .eq => BinaryOperation.eq,
+                .neq => BinaryOperation.neq,
+                .lt => BinaryOperation.lt,
+                .lte => BinaryOperation.lte,
+                .gt => BinaryOperation.gt,
+                .gte => BinaryOperation.gte,
 
                 .semicolon, .right_paren, .in, .then, .elif, .@"else" => return lhs,
 
@@ -776,6 +795,34 @@ const Tests = struct {
         try expectFailParse(error.EndOfFile, &.{.{ .integer = 1 }});
         try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .plus, .plus });
         try expectFailParse(error.UnexpectedToken, &.{ .{ .integer = 1 }, .plus, .{ .integer = 3 }, .equals });
+    }
+
+    test "boolean binops" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParseExpr(
+            &.{ .{ .integer = 1 }, .eq, .{ .integer = 2 }, .semicolon },
+            .{ .binop = .{
+                .op = .eq,
+                .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+                .rhs = locate(loc, try e(a, .{ .integer = 2 })),
+            } },
+        );
+
+        try expectEqualParseExpr(
+            &.{ .{ .integer = 1 }, .gte, .{ .integer = 2 }, .plus, .{ .identifier = "a" }, .semicolon },
+            .{ .binop = .{
+                .op = .gte,
+                .lhs = locate(loc, try e(a, .{ .integer = 1 })),
+                .rhs = locate(loc, try e(a, .{ .binop = .{
+                    .op = .plus,
+                    .lhs = locate(loc, try e(a, .{ .integer = 2 })),
+                    .rhs = locate(loc, try e(a, .{ .identifier = "a" })),
+                } })),
+            } },
+        );
     }
 
     test "assignments" {
