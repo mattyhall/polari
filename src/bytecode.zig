@@ -67,8 +67,25 @@ pub const Op = enum(u8) {
     /// stack.
     divide,
 
-    // NEG: negates the last value on the stack and pushes the result onto the stack.
+    /// NEG: negates the last value on the stack and pushes the result onto the stack.
     negate,
+
+    /// EQ: checks whether the last two values on the stack are equal and pushes the result onto the stack.
+    eq,
+    /// NEQ: checks whether the last two values on the stack are equal and pushes the result onto the stack.
+    neq,
+    /// LT: checks whether the penultimate value on the stack is less than the last value on the stack pushes the
+    /// result onto the stack.
+    lt,
+    /// LTE: checks whether the penultimate value on the stack is less than or equal to the last value on the stack
+    /// pushes the result onto the stack.
+    lte,
+    /// LT: checks whether the penultimate value on the stack is greater than the last value on the stack pushes the
+    /// result onto the stack.
+    gt,
+    /// GTE: checks whether the penultimate value on the stack is greater than or equal to the last value on the stack
+    /// pushes the result onto the stack.
+    gte,
 
     /// CALL n: calls the function n values down on the stack.
     ///
@@ -102,6 +119,12 @@ pub const Op = enum(u8) {
             .multiply => .{ .op = "MULT", .rest = "" },
             .divide => .{ .op = "DIV", .rest = "" },
             .negate => .{ .op = "NEG", .rest = "" },
+            .eq => .{ .op = "EQ", .rest = "" },
+            .neq => .{ .op = "NEQ", .rest = "" },
+            .lt => .{ .op = "LT", .rest = "" },
+            .lte => .{ .op = "LTE", .rest = "" },
+            .gt => .{ .op = "GT", .rest = "" },
+            .gte => .{ .op = "GTE", .rest = "" },
             .call => .{ .op = "CALL", .rest = "  " },
             .ret => .{ .op = "RET", .rest = "" },
             .jmp8 => .{ .op = "JMP", .rest = " p" },
@@ -322,6 +345,7 @@ pub const Chunk = struct {
                     try writer.print("{x:<4}", .{arg});
                 },
                 .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide, .negate => try op.print(writer),
+                .eq, .neq, .lt, .lte, .gt, .gte => try op.print(writer),
                 .popl, .ret => try op.print(writer),
                 .rare => {
                     i += 1;

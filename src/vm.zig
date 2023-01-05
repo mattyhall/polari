@@ -65,13 +65,19 @@ pub const Vm = struct {
         const a = try self.pop();
         if (a != .integer or b != .integer) return error.WrongType;
 
-        self.stack.appendAssumeCapacity(.{ .integer = switch (op) {
-            .add => a.integer + b.integer,
-            .subtract => a.integer - b.integer,
-            .multiply => a.integer * b.integer,
-            .divide => @divFloor(a.integer, b.integer),
+        self.stack.appendAssumeCapacity(switch (op) {
+            .add => .{ .integer = a.integer + b.integer },
+            .subtract => .{ .integer = a.integer - b.integer },
+            .multiply => .{ .integer = a.integer * b.integer },
+            .divide => .{ .integer = @divFloor(a.integer, b.integer) },
+            .eq => .{ .boolean = a.integer == b.integer },
+            .neq => .{ .boolean = a.integer != b.integer },
+            .lt => .{ .boolean = a.integer < b.integer },
+            .lte => .{ .boolean = a.integer <= b.integer },
+            .gt => .{ .boolean = a.integer > b.integer },
+            .gte => .{ .boolean = a.integer >= b.integer },
             else => unreachable,
-        } });
+        });
     }
 
     /// run interprets the bytecode in chunk.
@@ -142,7 +148,7 @@ pub const Vm = struct {
                 .neg_one => try self.stack.append(self.gpa, .{ .integer = -1 }),
                 .true => try self.stack.append(self.gpa, .{ .boolean = true }),
                 .false => try self.stack.append(self.gpa, .{ .boolean = false }),
-                .add, .subtract, .multiply, .divide => try self.runBinop(op),
+                .add, .subtract, .multiply, .divide, .eq, .neq, .lt, .lte, .gt, .gte => try self.runBinop(op),
                 .negate => {
                     const arg = try self.pop();
                     if (arg != .integer) return error.WrongType;
@@ -334,4 +340,14 @@ test "jumps" {
     try to_after_else_jmp.set();
 
     try testExpectStack(chunk, &.{.{ .integer = -1 }}, 0);
+}
+
+test "boolean binops" {
+    var chunk = bc.Chunk.init(testing.allocator);
+    defer chunk.deinit();
+
+    try chunk.writeOp(.one);
+    try chunk.writeOp(.neg_one);
+    try chunk.writeOp(.eq);
+    try testExpectStack(chunk, &.{.{ .boolean = false }}, 0);
 }

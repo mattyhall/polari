@@ -61,7 +61,12 @@ pub const Compiler = struct {
                     .multiply => .multiply,
                     .divide => .divide,
                     .apply => unreachable,
-                    else => @panic("not implemented"),
+                    .eq => .eq,
+                    .neq => .neq,
+                    .lt => .lt,
+                    .lte => .lte,
+                    .gt => .gt,
+                    .gte => .gte,
                 });
             },
             .unaryop => |unaryop| {
@@ -317,6 +322,17 @@ test "if/then/elif/else" {
         \\JMPF   p6   
         \\ONE   
         \\JMP    p7   
+        \\NONE  
+        \\
+    );
+
+    try testCompile("if 1 == 2 then 1 else -1;",
+        \\ONE   
+        \\CONST  c0    ; 2
+        \\EQ    
+        \\JMPF   p9   
+        \\ONE   
+        \\JMP    pa   
         \\NONE  
         \\
     );
