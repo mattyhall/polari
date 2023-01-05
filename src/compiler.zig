@@ -64,6 +64,11 @@ pub const Compiler = struct {
                 });
             },
             .unaryop => |unaryop| {
+                if (unaryop.op == .negate and unaryop.e.inner.* == .integer and unaryop.e.inner.integer == 1) {
+                    try self.chunk.writeOp(.neg_one);
+                    return;
+                }
+
                 try self.compileExpression(unaryop.e.inner);
                 if (unaryop.op == .negate) try self.chunk.writeOp(.negate);
             },
@@ -188,6 +193,12 @@ fn testCompile(source: []const u8, disassembly: []const u8) !void {
 }
 
 test "constants" {
+    try testCompile("1;-1;",
+        \\ONE   
+        \\NONE  
+        \\
+    );
+
     try testCompile("10;",
         \\CONST  c0    ; 10
         \\
