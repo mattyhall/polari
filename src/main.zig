@@ -180,6 +180,37 @@ fn DotWriter(comptime W: anytype) type {
                         , .{ .args_id = args_id, .arg_id = arg_id });
                     }
                 },
+                .@"if" => |f| {
+                    const then_id = self.id();
+                    const else_id = self.id();
+
+                    try self.w.print(
+                        \\  e_{[e_id]} [label="if",color="white",fontcolor="white"]
+                        \\
+                    , .{ .e_id = e_id });
+
+                    var cond_id = try self.writeExpression(f.condition.inner);
+                    var then_e_id = try self.writeExpression(f.then.inner);
+                    var else_e_id = try self.writeExpression(f.@"else".inner);
+
+                    try self.w.print(
+                        \\  e_{[e_id]} -- e_{[cond_id]} [color="white"]
+                        \\  if_{[then_id]} [label="then",color="white",fontcolor="white"]
+                        \\  if_{[else_id]} [label="else",color="white",fontcolor="white"]
+                        \\  e_{[e_id]} -- if_{[then_id]} [color="white"]
+                        \\  e_{[e_id]} -- if_{[else_id]} [color="white"]
+                        \\  if_{[then_id]} -- e_{[then_e_id]} [color="white"]
+                        \\  if_{[else_id]} -- e_{[else_e_id]} [color="white"]
+                        \\
+                    , .{
+                        .e_id = e_id,
+                        .cond_id = cond_id,
+                        .then_id = then_id,
+                        .else_id = else_id,
+                        .then_e_id = then_e_id,
+                        .else_e_id = else_e_id,
+                    });
+                },
             }
 
             return e_id;

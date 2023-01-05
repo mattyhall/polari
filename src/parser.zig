@@ -18,6 +18,7 @@ pub const Expression = union(enum) {
     let: struct { assignments: []Located(Assignment), in: Located(*Expression) },
     function: Function,
     apply: struct { f: Located(*Expression), args: []Located(*Expression) },
+    @"if": struct { condition: Located(*Expression), then: Located(*Expression), @"else": Located(*Expression) },
 
     pub fn eql(lhs: *const Expression, rhs: *const Expression) bool {
         if (std.meta.activeTag(lhs.*) != std.meta.activeTag(rhs.*)) return false;
@@ -69,6 +70,12 @@ pub const Expression = union(enum) {
                 }
 
                 return true;
+            },
+            .@"if" => |f| {
+                const rhs_if = rhs.@"if";
+                return f.condition.inner.eql(rhs_if.condition.inner) and
+                    f.then.inner.eql(rhs_if.then.inner) and
+                    f.@"else".inner.eql(rhs_if.@"else".inner);
             },
         }
     }
@@ -141,6 +148,15 @@ pub const Expression = union(enum) {
                     try writer.writeAll(" ");
                     try arg.inner.write(writer);
                 }
+                try writer.writeAll(")");
+            },
+            .@"if" => |f| {
+                try writer.writeAll("(if ");
+                try f.condition.inner.write(writer);
+                try writer.writeAll(" ");
+                try f.then.inner.write(writer);
+                try writer.writeAll(" ");
+                try f.@"else".inner.write(writer);
                 try writer.writeAll(")");
             },
         }
@@ -303,7 +319,7 @@ pub const Parser = struct {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
             .true, .false => {},
-            .let, .in, .@"fn", .fat_arrow => {},
+            .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => {},
         }
 
         const tokloc = try self.pop();
@@ -433,6 +449,37 @@ pub const Parser = struct {
         return locate(loc, try self.program.create(Expression{ .function = .{ .params = al.items, .body = e } }));
     }
 
+    fn parseIf(self: *Parser, loc: Loc) Error!Located(*Expression) {
+        var condition = try self.parseExpression(0);
+
+        const hopefully_then = try self.pop();
+        switch (hopefully_then.tok) {
+            .then => {},
+            else => |t| {
+                try self.allocDiag(hopefully_then.loc, "unexpected token {}, expected then", .{t});
+                return error.UnexpectedToken;
+            },
+        }
+
+        var then = try self.parseExpression(0);
+
+        const tokloc = try self.pop();
+        var else_e = switch (tokloc.tok) {
+            .@"else" => try self.parseExpression(0),
+            .elif => try self.parseIf(tokloc.loc),
+            else => |t| {
+                try self.allocDiag(hopefully_then.loc, "unexpected token {}, expected else", .{t});
+                return error.UnexpectedToken;
+            },
+        };
+
+        return .{ .loc = loc, .inner = try self.program.create(Expression{ .@"if" = .{
+            .condition = condition,
+            .then = then,
+            .@"else" = else_e,
+        } }) };
+    }
+
     /// parseExpressionLhs parses an expression but requires the caller to pass the first token (the lhs) of the
     /// expression. It uses Pratt parsing to handle precedence.
     fn parseExpressionLhs(self: *Parser, min_bp: u8, lhs_tokloc: TokLoc) Error!Located(*Expression) {
@@ -455,6 +502,7 @@ pub const Parser = struct {
             },
             .let => return try self.parseLet(l),
             .@"fn" => return try self.parseFn(l),
+            .@"if" => return try self.parseIf(l),
             else => |tok| {
                 try self.allocDiag(lhs_tokloc.loc, "unexpected token: expected expression, got {}", .{tok});
                 return error.UnexpectedToken;
@@ -473,7 +521,7 @@ pub const Parser = struct {
                 .asterisk => BinaryOperation.multiply,
                 .forward_slash => BinaryOperation.divide,
 
-                .semicolon, .right_paren, .in => return lhs,
+                .semicolon, .right_paren, .in, .then, .elif, .@"else" => return lhs,
 
                 .identifier, .left_paren, .integer, .true, .false => .apply,
 
@@ -945,6 +993,46 @@ const Tests = struct {
                     .rhs = locate(loc, try e(a, .{ .integer = 2 })),
                 },
             },
+        );
+    }
+
+    test "if..elif..else" {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var a = arena.allocator();
+
+        try expectEqualParseExpr(
+            &.{ .@"if", .true, .then, .{ .identifier = "a" }, .@"else", .{ .identifier = "b" }, .semicolon },
+            .{ .@"if" = .{
+                .condition = locate(loc, try e(a, .{ .boolean = true })),
+                .then = locate(loc, try e(a, .{ .identifier = "a" })),
+                .@"else" = locate(loc, try e(a, .{ .identifier = "b" })),
+            } },
+        );
+
+        try expectEqualParseExpr(
+            &.{
+                .@"if",
+                .true,
+                .then,
+                .{ .identifier = "a" },
+                .elif,
+                .false,
+                .then,
+                .{ .identifier = "b" },
+                .@"else",
+                .{ .identifier = "c" },
+                .semicolon,
+            },
+            .{ .@"if" = .{
+                .condition = locate(loc, try e(a, .{ .boolean = true })),
+                .then = locate(loc, try e(a, .{ .identifier = "a" })),
+                .@"else" = locate(loc, try e(a, Expression{ .@"if" = .{
+                    .condition = locate(loc, try e(a, .{ .boolean = false })),
+                    .then = locate(loc, try e(a, .{ .identifier = "b" })),
+                    .@"else" = locate(loc, try e(a, .{ .identifier = "c" })),
+                } })),
+            } },
         );
     }
 };

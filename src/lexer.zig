@@ -35,6 +35,10 @@ pub const Tok = union(enum) {
     in,
     @"fn",
     fat_arrow,
+    @"if",
+    elif,
+    @"else",
+    then,
 };
 
 /// Loc represents a locaiton in the source code. It is in a human-readable format - i.e. line and col start at 1.
@@ -212,7 +216,17 @@ pub const Lexer = struct {
             ';' => self.tokloc(.semicolon),
             '(' => self.tokloc(.left_paren),
             ')' => self.tokloc(.right_paren),
-            't' => try self.parseKeyword("true", .true),
+            'e' => {
+                if (self.index + 2 >= self.source.len or self.source[self.index + 1] != 'l')
+                    return try self.parseIdentifier();
+
+                return switch (self.source[self.index + 2]) {
+                    'i' => try self.parseKeyword("elif", .elif),
+                    's' => try self.parseKeyword("else", .@"else"),
+
+                    else => try self.parseIdentifier(),
+                };
+            },
             'f' => {
                 if (self.index + 1 >= self.source.len) return try self.parseIdentifier();
 
@@ -222,8 +236,25 @@ pub const Lexer = struct {
                     else => try self.parseIdentifier(),
                 };
             },
+            'i' => {
+                if (self.index + 1 >= self.source.len) return try self.parseIdentifier();
+
+                return switch (self.source[self.index + 1]) {
+                    'f' => try self.parseKeyword("if", .@"if"),
+                    'n' => try self.parseKeyword("in", .in),
+                    else => try self.parseIdentifier(),
+                };
+            },
             'l' => try self.parseKeyword("let", .let),
-            'i' => try self.parseKeyword("in", .in),
+            't' => {
+                if (self.index + 1 >= self.source.len) return try self.parseIdentifier();
+
+                return switch (self.source[self.index + 1]) {
+                    'h' => try self.parseKeyword("then", .then),
+                    'r' => try self.parseKeyword("true", .true),
+                    else => try self.parseIdentifier(),
+                };
+            },
             else => {
                 if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return try self.parseIdentifier();
 
@@ -302,7 +333,7 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
-            .let, .in, .@"fn", .fat_arrow => continue,
+            .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => continue,
             .true, .false => continue,
         }
 
@@ -363,4 +394,5 @@ test "keywords" {
     try expectLex(testing.allocator, "true-f", &.{.{ .identifier = "true-f" }});
     try expectLex(testing.allocator, "let", &.{.let});
     try expectLex(testing.allocator, "in", &.{.in});
+    try expectLex(testing.allocator, "if then elif else", &.{ .@"if", .then, .elif, .@"else" });
 }

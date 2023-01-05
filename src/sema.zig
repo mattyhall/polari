@@ -74,6 +74,11 @@ fn normaliseExpression(arena: std.mem.Allocator, expr: *parser.Expression) error
             try normaliseExpression(arena, let.in.inner);
         },
         .function => |f| try normaliseExpression(arena, f.body.inner),
+        .@"if" => |f| {
+            try normaliseExpression(arena, f.condition.inner);
+            try normaliseExpression(arena, f.then.inner);
+            try normaliseExpression(arena, f.@"else".inner);
+        },
         .integer, .boolean, .identifier => return,
         .apply => unreachable,
     }
@@ -123,6 +128,11 @@ fn getIdentifiers(
 
             try getIdentifiers(a, f.body.inner, deps, ignore);
             ignore.shrinkRetainingCapacity(f.params.len);
+        },
+        .@"if" => |f| {
+            try getIdentifiers(a, f.condition.inner, deps, ignore);
+            try getIdentifiers(a, f.then.inner, deps, ignore);
+            try getIdentifiers(a, f.@"else".inner, deps, ignore);
         },
     }
 }
@@ -691,6 +701,7 @@ pub const Sema = struct {
 
                 try self.generateRulesForApply(.{ .expr = a.f.inner }, args, v, loc);
             },
+            .@"if" => @panic("not implemented"),
         }
     }
 

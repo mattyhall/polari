@@ -106,6 +106,7 @@ pub const Compiler = struct {
                 try self.chunk.writeOp(.call);
                 try self.chunk.writeU8(@intCast(u8, a.args.len));
             },
+            .@"if" => @panic("not implemented"),
         }
     }
 
