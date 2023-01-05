@@ -111,7 +111,17 @@ pub const Compiler = struct {
                 try self.chunk.writeOp(.call);
                 try self.chunk.writeU8(@intCast(u8, a.args.len));
             },
-            .@"if" => @panic("not implemented"),
+            .@"if" => |f| {
+                try self.compileExpression(f.condition.inner);
+                var to_else_jmp = try self.chunk.writeJmp(.jmpf8);
+
+                try self.compileExpression(f.then.inner);
+                var to_after_else_jmp = try self.chunk.writeJmp(.jmp8);
+
+                try to_else_jmp.set();
+                try self.compileExpression(f.@"else".inner);
+                try to_after_else_jmp.set();
+            },
         }
     }
 
@@ -296,6 +306,17 @@ test "function" {
         \\CALL    2   
         \\CALL    2   
         \\SET    l1   
+        \\
+    );
+}
+
+test "if/then/elif/else" {
+    try testCompile("if true then 1 else -1;",
+        \\TRUE  
+        \\JMPF   p6   
+        \\ONE   
+        \\JMP    p7   
+        \\NONE  
         \\
     );
 }

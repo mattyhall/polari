@@ -170,7 +170,22 @@ pub const Vm = struct {
                     _ = try self.pop();
                     self.stack.appendAssumeCapacity(return_value);
                 },
-                .jmp8, .jmpf8 => @panic("not implemented"),
+                .jmp8 => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
+                    const i = self.chunk.code.items[self.pc];
+                    self.pc = i;
+                },
+                .jmpf8 => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
+                    const i = self.chunk.code.items[self.pc];
+
+                    switch (try self.pop()) {
+                        .boolean => |b| {
+                            if (b) self.pc += 1 else self.pc = i;
+                        },
+                        else => return error.CouldNotParse,
+                    }
+                },
                 .rare => try self.runRare(),
             }
         }
@@ -302,4 +317,21 @@ test "functions" {
     try chunk.writeU8(2);
 
     try testExpectStack(chunk, &.{.{ .integer = 2 }}, 0);
+}
+
+test "jumps" {
+    var chunk = bc.Chunk.init(testing.allocator);
+    defer chunk.deinit();
+
+    try chunk.writeOp(.false);
+    var to_else_jmp = try chunk.writeJmp(.jmpf8);
+
+    try chunk.writeOp(.one);
+    var to_after_else_jmp = try chunk.writeJmp(.jmp8);
+
+    try to_else_jmp.set();
+    try chunk.writeOp(.neg_one);
+    try to_after_else_jmp.set();
+
+    try testExpectStack(chunk, &.{.{ .integer = -1 }}, 0);
 }
