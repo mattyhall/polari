@@ -170,6 +170,7 @@ pub const Vm = struct {
                     _ = try self.pop();
                     self.stack.appendAssumeCapacity(return_value);
                 },
+                .jmp8, .jmpf8 => @panic("not implemented"),
                 .rare => try self.runRare(),
             }
         }

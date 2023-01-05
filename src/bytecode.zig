@@ -78,6 +78,11 @@ pub const Op = enum(u8) {
     /// RET: return from function, removing the function off the stack.
     ret,
 
+    /// JMP a: jump to bytecode position a.
+    jmp8,
+    /// JMPF a: if value on the top of the stack is false then jumps to bytecode position a.
+    jmpf8,
+
     /// RARE a: a is a RareOp.
     rare,
 
@@ -99,6 +104,8 @@ pub const Op = enum(u8) {
             .negate => .{ .op = "NEG", .rest = "" },
             .call => .{ .op = "CALL", .rest = "  " },
             .ret => .{ .op = "RET", .rest = "" },
+            .jmp8 => .{ .op = "JMP", .rest = " p" },
+            .jmpf8 => .{ .op = "JMPF", .rest = " p" },
             .rare => return,
         };
 
@@ -120,14 +127,44 @@ pub const RareOp = enum(u8) {
     set16,
     set32,
 
+    /// JMP a: jump to bytecode position a.
+    jmp16,
+    jmp32,
+
+    /// JMPF a: if value on the top of the stack is false then jumps to bytecode position a.
+    jmpf16,
+    jmpf32,
+
     pub fn print(self: RareOp, writer: anytype) !void {
         var s: struct { op: []const u8, rest: []const u8 } = switch (self) {
             .const16, .const32 => .{ .op = "CONST", .rest = " c" },
             .get16, .get32 => .{ .op = "GET", .rest = " l" },
             .set16, .set32 => .{ .op = "SET", .rest = " l" },
+            .jmp16, .jmp32 => .{ .op = "JMP", .rest = " p" },
+            .jmpf16, .jmpf32 => .{ .op = "JMPF", .rest = " p" },
         };
 
         try writer.print("{s:<6}{s}", .{ s.op, s.rest });
+    }
+};
+
+/// Jmp represents a jmp instruction
+pub const Jmp = struct {
+    chunk: *Chunk,
+
+    /// index is the index of the jump opcode.
+    ///
+    /// NOTE: we assume that the opcode is a single byte.
+    index: usize,
+
+    pub fn set(self: *Jmp) !void {
+        const pos = self.chunk.code.items.len;
+        if (pos > std.math.maxInt(u8)) {
+            // TODO: implement using a wider jmp by shuffling code rightwards to make space
+            @panic("not implemented");
+        }
+
+        self.chunk.code.items[self.index + 1] = @intCast(u8, pos);
     }
 };
 
@@ -202,9 +239,24 @@ pub const Chunk = struct {
         try self.code.writer(self.gpa).writeIntLittle(u32, v);
     }
 
+    /// writeJmp writes the jmp opcode Op and returns a Jmp so the location can be set later.
+    pub fn writeJmp(self: *Chunk, comptime op: Op) !Jmp {
+        switch (op) {
+            .jmpf8, .jmp8 => {},
+            else => @compileError("can only writeJmp with jmp opcodes"),
+        }
+
+        const index = self.code.items.len;
+
+        try self.writeOp(op);
+        try self.writeU8(undefined);
+
+        return Jmp{ .chunk = self, .index = index };
+    }
+
     /// next increase i by one if there is still code left.
     fn next(self: *const Chunk, i: *u32) error{EndOfFile}!u8 {
-        if (i.* > self.code.items.len - 1) return error.EndOfFile;
+        if (i.* + 1 > self.code.items.len - 1) return error.EndOfFile;
 
         i.* = i.* + 1;
         return self.code.items[i.*];
@@ -217,13 +269,13 @@ pub const Chunk = struct {
         i.* += 1;
 
         var arg = switch (op) {
-            .const16, .get16, .set16 => b: {
+            .const16, .get16, .set16, .jmp16, .jmpf16 => b: {
                 var fbs = std.io.fixedBufferStream(self.code.items[i.*..]);
                 const arg = try fbs.reader().readIntLittle(u16);
                 i.* = i.* + 1;
                 break :b @intCast(usize, arg);
             },
-            .const32, .get32, .set32 => b: {
+            .const32, .get32, .set32, .jmp32, .jmpf32 => b: {
                 var fbs = std.io.fixedBufferStream(self.code.items[i.*..]);
                 const arg = try fbs.reader().readIntLittle(u32);
                 i.* = i.* + 3;
@@ -264,7 +316,7 @@ pub const Chunk = struct {
 
                     try self.constants.items[arg].print(writer);
                 },
-                .popl_n, .get8, .set8, .call => {
+                .popl_n, .get8, .set8, .jmp8, .jmpf8, .call => {
                     const arg = try self.next(&i);
                     try op.print(writer);
                     try writer.print("{x:<4}", .{arg});
@@ -324,6 +376,10 @@ test "disassemble" {
     try chunk.writeOp(.popl);
     try chunk.writeOp(.popl_n);
     try chunk.writeU8(5);
+    try chunk.writeOp(.jmpf8);
+    try chunk.writeU8(0);
+    try chunk.writeOp(.jmp8);
+    try chunk.writeU8(0);
 
     try testDissassemble(&chunk,
         \\CONST  c0    ; 147
@@ -334,6 +390,38 @@ test "disassemble" {
         \\SET    l1   
         \\POPL  
         \\POPLN   5   
+        \\JMPF   p0   
+        \\JMP    p0   
+        \\
+    );
+}
+
+test "jmps" {
+    var chunk = Chunk.init(testing.allocator);
+    defer chunk.deinit();
+
+    _ = try chunk.addConstant(.{ .integer = 147 });
+    _ = try chunk.addLocal("foo");
+
+    try chunk.writeOp(.const8);
+    try chunk.writeU8(0);
+    try chunk.writeOp(.get8);
+    try chunk.writeU8(0);
+
+    var jmp = try chunk.writeJmp(.jmp8);
+
+    try chunk.writeOp(.one);
+
+    try jmp.set();
+
+    try chunk.writeOp(.neg_one);
+
+    try testDissassemble(&chunk,
+        \\CONST  c0    ; 147
+        \\GET    l0   
+        \\JMP    p7   
+        \\ONE   
+        \\NONE  
         \\
     );
 }
