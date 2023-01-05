@@ -393,6 +393,9 @@ const Rule = union(enum) {
     /// We should have the same type as Variable.
     variable: Variable,
 
+    /// We should have type typ.
+    typ: Type,
+
     fn write(self: Rule, writer: anytype) !void {
         switch (self) {
             .function => |f| {
@@ -419,6 +422,7 @@ const Rule = union(enum) {
                 try v.write(writer);
             },
             .variable => |v| try v.write(writer),
+            .typ => |t| try t.write(writer),
         }
     }
 };
@@ -701,7 +705,29 @@ pub const Sema = struct {
 
                 try self.generateRulesForApply(.{ .expr = a.f.inner }, args, v, loc);
             },
-            .@"if" => @panic("not implemented"),
+            .@"if" => |f| {
+                try self.generateRulesForExpression(f.condition.loc, f.condition.inner);
+                try self.generateRulesForExpression(f.then.loc, f.then.inner);
+                try self.generateRulesForExpression(f.@"else".loc, f.@"else".inner);
+
+                try self.unifications.ensureUnusedCapacity(self.gpa, 4);
+                self.unifications.appendAssumeCapacity(.{
+                    .lhs = .{ .expr = f.condition.inner },
+                    .rhs = .{ .typ = .bool },
+                });
+                self.unifications.appendAssumeCapacity(.{
+                    .lhs = .{ .expr = f.then.inner },
+                    .rhs = .{ .variable = .{ .expr = f.@"else".inner } },
+                });
+                self.unifications.appendAssumeCapacity(.{
+                    .lhs = v,
+                    .rhs = .{ .variable = .{ .expr = f.then.inner } },
+                });
+                self.unifications.appendAssumeCapacity(.{
+                    .lhs = v,
+                    .rhs = .{ .variable = .{ .expr = f.@"else".inner } },
+                });
+            },
         }
     }
 
@@ -906,6 +932,11 @@ pub const Sema = struct {
                     };
 
                     try self.setType(unif.lhs, t.ret.*);
+                    i -= 1;
+                    _ = self.unifications.swapRemove(i);
+                },
+                .typ => |t| {
+                    try self.setType(unif.lhs, t);
                     i -= 1;
                     _ = self.unifications.swapRemove(i);
                 },
@@ -1170,4 +1201,16 @@ test "function calls" {
 test "fail: function calls" {
     try expectTypeCheckFail("f = fn x => -x;a = f true;", error.TypeCheckFailed);
     try expectTypeCheckFail("f = fn x y => x + y;a = f 1;", error.TypeCheckFailed);
+}
+
+test "if/then/elif/else" {
+    try expectTypesEqual("a = if true then 1 else 2;", &.{.{ .id = "a", .t = .int }});
+    try expectTypesEqual("a = if true then 1 elif false then 2 else 3;", &.{.{ .id = "a", .t = .int }});
+    try expectTypesEqual("a = if true then true else false;", &.{.{ .id = "a", .t = .bool }});
+}
+
+test "fail: if/then/elif/else" {
+    try expectTypeCheckFail("if 1 then 1 else 2;", error.TypeCheckFailed);
+    try expectTypeCheckFail("if true then 1 else false;", error.TypeCheckFailed);
+    try expectTypeCheckFail("a=false;if true then 1 elif false then 2 else a;", error.TypeCheckFailed);
 }
