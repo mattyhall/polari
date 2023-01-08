@@ -6,7 +6,6 @@ const bc = @import("bytecode.zig");
 pub const Frame = struct {
     return_address: usize,
     stack_pointer: usize,
-    local_pointer: usize,
     chunk: *const bc.Chunk,
 };
 
@@ -17,15 +16,14 @@ pub const Vm = struct {
     debug: bool = false,
     pc: usize = 0,
     frames: std.ArrayListUnmanaged(Frame) = .{},
-    locals: std.ArrayListUnmanaged(bc.Value) = .{},
     stack: std.ArrayListUnmanaged(bc.Value) = .{},
 
     pub fn init(gpa: std.mem.Allocator, chunk: *const bc.Chunk) Vm {
         return Vm{ .gpa = gpa, .chunk = chunk };
     }
 
-    fn localOffset(self: *const Vm) usize {
-        return self.frames.items[self.frames.items.len - 1].local_pointer;
+    fn stackOffset(self: *const Vm) usize {
+        return self.frames.items[self.frames.items.len - 1].stack_pointer;
     }
 
     /// pop pops a value off the stack, returning an error if there isn't one.
@@ -36,12 +34,11 @@ pub const Vm = struct {
     }
 
     /// pushFrame adds a call frame with the return address being the current location.
-    fn pushFrame(self: *Vm) !void {
+    fn pushFrame(self: *Vm, args: usize) !void {
         try self.frames.append(self.gpa, Frame{
             .chunk = self.chunk,
             .return_address = self.pc,
-            .stack_pointer = self.stack.items.len,
-            .local_pointer = self.locals.items.len,
+            .stack_pointer = self.stack.items.len - args,
         });
     }
 
@@ -50,6 +47,7 @@ pub const Vm = struct {
         var f = self.frames.pop();
         self.chunk = f.chunk;
         self.pc = f.return_address;
+        self.stack.shrinkRetainingCapacity(f.stack_pointer);
     }
 
     /// runRare assumes the next op is a rare one and runs it.
@@ -85,7 +83,6 @@ pub const Vm = struct {
         try self.frames.append(self.gpa, .{
             .chunk = self.chunk,
             .return_address = 0,
-            .local_pointer = 0,
             .stack_pointer = 0,
         });
 
@@ -101,7 +98,7 @@ pub const Vm = struct {
                     try v.print(w);
                     if (i != self.stack.items.len - 1) try w.writeAll(", ");
                 }
-                try w.print("] locals.len={}\n", .{self.locals.items.len});
+                try w.writeAll("]\n");
 
                 try op.print(w);
                 try w.writeAll("\n");
@@ -119,40 +116,38 @@ pub const Vm = struct {
                 },
                 .get8 => {
                     if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
-                    const i = self.chunk.code.items[self.pc] + self.localOffset();
+                    const i = self.chunk.code.items[self.pc] + self.stackOffset();
                     self.pc += 1;
-                    if (i >= self.locals.items.len) {
+                    if (i >= self.stack.items.len) {
                         return error.UnknownLocal;
                     }
 
-                    try self.stack.append(self.gpa, self.locals.items[i]);
+                    try self.stack.append(self.gpa, self.stack.items[i]);
                 },
                 .geta8 => {
                     if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc];
                     self.pc += 1;
-                    if (i >= self.locals.items.len) {
+                    if (i >= self.stack.items.len) {
                         return error.UnknownLocal;
                     }
 
-                    try self.stack.append(self.gpa, self.locals.items[i]);
+                    try self.stack.append(self.gpa, self.stack.items[i]);
                 },
                 .set8 => {
                     if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
-                    const i = self.chunk.code.items[self.pc] + self.localOffset();
+                    const i = self.chunk.code.items[self.pc] + self.stackOffset();
                     self.pc += 1;
-                    // TODO: could cause OOM errors on bad input. Can we assume i is the current size and just use
-                    // append here? Or do we need to bound it to something sensible?
-                    if (self.locals.items.len < i + 1)
-                        try self.locals.resize(self.gpa, i + 1);
-                    self.locals.items[i] = self.stack.pop();
+                    if (i >= self.stack.items.len) return error.CouldNotParse;
+                    if (i == self.stack.items.len - 1) continue;
+                    self.stack.items[i] = self.stack.pop();
                 },
-                .popl => _ = self.locals.pop(),
-                .popl_n => {
+                .pop => _ = try self.pop(),
+                .pop_n => {
                     if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc];
                     self.pc += 1;
-                    self.locals.shrinkRetainingCapacity(self.locals.items.len - i);
+                    self.stack.shrinkRetainingCapacity(self.stack.items.len - i);
                 },
                 .one => try self.stack.append(self.gpa, .{ .integer = 1 }),
                 .neg_one => try self.stack.append(self.gpa, .{ .integer = -1 }),
@@ -170,7 +165,7 @@ pub const Vm = struct {
                     const args = self.chunk.code.items[self.pc];
                     self.pc += 1;
 
-                    try self.pushFrame();
+                    try self.pushFrame(args);
 
                     var v = switch (self.stack.items[self.stack.items.len - 1 - args]) {
                         .function => |f| f,
@@ -181,9 +176,9 @@ pub const Vm = struct {
                     self.pc = 0;
                 },
                 .ret => {
-                    self.popFrame();
                     const return_value = try self.pop();
-                    _ = try self.pop();
+                    self.popFrame();
+                    _ = try self.pop(); // Remove the function we just called from the stack.
                     self.stack.appendAssumeCapacity(return_value);
                 },
                 .jmp8 => {
@@ -208,7 +203,6 @@ pub const Vm = struct {
     }
 
     pub fn deinit(self: *Vm) void {
-        self.locals.deinit(self.gpa);
         self.stack.deinit(self.gpa);
         self.frames.deinit(self.gpa);
     }
@@ -216,14 +210,13 @@ pub const Vm = struct {
 
 const testing = std.testing;
 
-fn testExpectStack(chunk: bc.Chunk, expected: []const bc.Value, locals: usize) !void {
+fn testExpectStack(chunk: bc.Chunk, expected: []const bc.Value) !void {
     var vm = Vm.init(testing.allocator, &chunk);
     defer vm.deinit();
 
     try vm.run();
 
     try testing.expectEqualSlices(bc.Value, expected, vm.stack.items);
-    try testing.expectEqual(vm.locals.items.len, locals);
 }
 
 test "constants" {
@@ -237,7 +230,7 @@ test "constants" {
     try chunk.writeOp(.const8);
     try chunk.writeU8(1);
 
-    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } }, 0);
+    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } });
 }
 
 test "locals" {
@@ -257,7 +250,12 @@ test "locals" {
     try chunk.writeOp(.get8);
     try chunk.writeU8(1);
 
-    try testExpectStack(chunk, &.{ .{ .integer = 147 }, .{ .boolean = true } }, 2);
+    try testExpectStack(chunk, &.{
+        .{ .integer = 147 },
+        .{ .boolean = true },
+        .{ .integer = 147 },
+        .{ .boolean = true },
+    });
 }
 
 test "maths" {
@@ -275,7 +273,7 @@ test "maths" {
     try chunk.writeOp(.subtract); // 2 - 3
     try chunk.writeOp(.negate); // *-1;
 
-    try testExpectStack(chunk, &.{.{ .integer = 1 }}, 0);
+    try testExpectStack(chunk, &.{.{ .integer = 1 }});
 }
 
 test "scopes" {
@@ -293,32 +291,21 @@ test "scopes" {
         }
     }
 
-    try chunk.writeOp(.popl);
-    try chunk.writeOp(.popl_n);
+    try chunk.writeOp(.pop);
+    try chunk.writeOp(.pop_n);
     try chunk.writeU8(2);
 
-    try chunk.writeOp(.get8);
-    try chunk.writeU8(0);
-    try chunk.writeOp(.get8);
-    try chunk.writeU8(1);
-
-    try testExpectStack(chunk, &.{ .{ .integer = 0 }, .{ .integer = 1 } }, 2);
+    try testExpectStack(chunk, &.{ .{ .integer = 0 }, .{ .integer = 1 } });
 }
 
 test "functions" {
     var f_chunk = bc.Chunk.init(testing.allocator);
 
-    try f_chunk.writeOp(.set8);
-    try f_chunk.writeU8(1);
-    try f_chunk.writeOp(.set8);
-    try f_chunk.writeU8(0);
     try f_chunk.writeOp(.get8);
     try f_chunk.writeU8(0);
     try f_chunk.writeOp(.get8);
     try f_chunk.writeU8(1);
     try f_chunk.writeOp(.add);
-    try f_chunk.writeOp(.popl_n);
-    try f_chunk.writeU8(2);
     try f_chunk.writeOp(.ret);
 
     var chunk = bc.Chunk.init(testing.allocator);
@@ -332,7 +319,7 @@ test "functions" {
     try chunk.writeOp(.call);
     try chunk.writeU8(2);
 
-    try testExpectStack(chunk, &.{.{ .integer = 2 }}, 0);
+    try testExpectStack(chunk, &.{.{ .integer = 2 }});
 }
 
 test "jumps" {
@@ -349,7 +336,7 @@ test "jumps" {
     try chunk.writeOp(.neg_one);
     try to_after_else_jmp.set();
 
-    try testExpectStack(chunk, &.{.{ .integer = -1 }}, 0);
+    try testExpectStack(chunk, &.{.{ .integer = -1 }});
 }
 
 test "boolean binops" {
@@ -359,5 +346,5 @@ test "boolean binops" {
     try chunk.writeOp(.one);
     try chunk.writeOp(.neg_one);
     try chunk.writeOp(.eq);
-    try testExpectStack(chunk, &.{.{ .boolean = false }}, 0);
+    try testExpectStack(chunk, &.{.{ .boolean = false }});
 }

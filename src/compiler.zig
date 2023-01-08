@@ -118,14 +118,14 @@ pub const Compiler = struct {
 
                 if (let.assignments.len == 1) {
                     self.chunk.popLocals(1);
-                    try self.chunk.writeOp(.popl);
+                    try self.chunk.writeOp(.pop);
                     return;
                 }
 
                 var locals = @intCast(isize, let.assignments.len);
                 self.chunk.popLocals(@intCast(u32, locals));
                 while (locals > 0) : (locals -= std.math.maxInt(u8)) {
-                    try self.chunk.writeOp(.popl_n);
+                    try self.chunk.writeOp(.pop_n);
                     try self.chunk.writeU8(@intCast(u8, std.math.min(std.math.maxInt(u8), locals)));
                 }
             },
@@ -162,33 +162,9 @@ pub const Compiler = struct {
     }
 
     fn compileFunction(self: *Compiler, name: []const u8, f: *const parser.Function) error{ OutOfMemory, LocalNotFound }!bc.Value {
-        // The rightmost argument is at the top of the stack which means we need to assign locals in reverse order.
-        var current: u32 = undefined;
-        for (f.params) |param| {
-            const l = try self.chunk.addLocal(param.inner.identifier);
-            current = l;
-        }
-
-        var i: usize = f.params.len - 1;
-        while (true) {
-            try self.writeLocal(.set, current);
-            if (i == 0) break;
-            i -= 1;
-            current -= 1;
-        }
+        for (f.params) |param| _ = try self.chunk.addLocal(param.inner.identifier);
 
         try self.compileExpression(f.body.inner);
-
-        var locals = @intCast(isize, f.params.len);
-        if (locals == 1) {
-            try self.chunk.writeOp(.popl);
-        } else {
-            while (locals > 0) : (locals -= std.math.maxInt(u8)) {
-                try self.chunk.writeOp(.popl_n);
-                try self.chunk.writeU8(@intCast(u8, std.math.min(std.math.maxInt(u8), locals)));
-            }
-        }
-
         try self.chunk.writeOp(.ret);
 
         return bc.Value{ .function = .{ .chunk = self.chunk, .arity = @intCast(u32, f.params.len), .name = name } };
@@ -197,10 +173,13 @@ pub const Compiler = struct {
     pub fn compile(self: *Compiler) !void {
         for (self.program.stmts.items) |stmt| {
             switch (stmt.inner) {
-                .expression => |e| try self.compileExpression(e),
+                .expression => |e| {
+                    try self.compileExpression(e);
+                    try self.chunk.writeOp(.pop);
+                },
                 .assignment => |a| {
-                    try self.compileExpression(a.expression.inner);
                     const l = try self.chunk.addLocal(a.identifier);
+                    try self.compileExpression(a.expression.inner);
                     try self.writeLocal(.set, l);
                 },
             }
@@ -241,17 +220,21 @@ fn testCompile(source: []const u8, disassembly: []const u8) !void {
 test "constants" {
     try testCompile("1;-1;",
         \\ONE   
+        \\POP   
         \\NONE  
+        \\POP   
         \\
     );
 
     try testCompile("10;",
         \\CONST  c0    ; 10
+        \\POP   
         \\
     );
 
     try testCompile("true;",
         \\TRUE  
+        \\POP   
         \\
     );
 
@@ -271,6 +254,7 @@ test "maths" {
         \\CONST  c3    ; 3
         \\DIV   
         \\ADD   
+        \\POP   
         \\
     );
 }
@@ -282,7 +266,8 @@ test "let..in" {
         \\GET    l0   
         \\CONST  c0    ; 2
         \\ADD   
-        \\POPL  
+        \\POP   
+        \\POP   
         \\
     );
 
@@ -290,11 +275,11 @@ test "let..in" {
         \\CONST  c0    ; 5
         \\SET    l0   
         \\ONE   
-        \\SET    l1   
-        \\GET    l1   
+        \\SET    l2   
+        \\GET    l2   
         \\CONST  c1    ; 2
         \\ADD   
-        \\POPL  
+        \\POP   
         \\SET    l1   
         \\
     );
@@ -303,12 +288,9 @@ test "let..in" {
 test "function" {
     try testCompile("a = 1; f = fn x y => x + y; b = f 1 1;",
         \\============  ============
-        \\SET    l1   
-        \\SET    l0   
         \\GET    l0   
         \\GET    l1   
         \\ADD   
-        \\POPLN   2   
         \\RET   
         \\============================
         \\ONE   
@@ -324,12 +306,9 @@ test "function" {
     );
     try testCompile("f = fn x y => x + y; b = f 1 (f 2 3);",
         \\============  ============
-        \\SET    l1   
-        \\SET    l0   
         \\GET    l0   
         \\GET    l1   
         \\ADD   
-        \\POPLN   2   
         \\RET   
         \\============================
         \\CONST  c0    ; <func >
@@ -353,6 +332,7 @@ test "if/then/elif/else" {
         \\ONE   
         \\JMP    p7   
         \\NONE  
+        \\POP   
         \\
     );
 
@@ -364,6 +344,7 @@ test "if/then/elif/else" {
         \\ONE   
         \\JMP    pa   
         \\NONE  
+        \\POP   
         \\
     );
 }

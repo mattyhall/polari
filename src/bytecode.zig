@@ -38,16 +38,16 @@ pub const Op = enum(u8) {
     /// CONST a: a gives the index into the constants array to push onto the stack.
     const8,
 
-    /// GET a: a gives the index into this chunk's locals array to push onto the stack.
+    /// GET a: a gives the index of a value in this chunk's stack to push onto the top.
     get8,
-    // GETA a: a gives the index into the entire locals array to push onto the stack.
+    // GETA a: a gives the index into the entire stack to push onto the top.
     geta8,
     /// SET a: sets the local with index a to the value on the top of the stack.
     set8,
-    /// POPL: pops a single local
-    popl,
-    /// POPN n: pops n locals
-    popl_n,
+    /// POP: pops a single stack value.
+    pop,
+    /// POPN n: pops n values off the stack.
+    pop_n,
 
     /// ONE: pushes 1 onto the stack.
     one,
@@ -111,8 +111,8 @@ pub const Op = enum(u8) {
             .get8 => .{ .op = "GET", .rest = " l" },
             .geta8 => .{ .op = "GETA", .rest = " l" },
             .set8 => .{ .op = "SET", .rest = " l" },
-            .popl => .{ .op = "POPL", .rest = "" },
-            .popl_n => .{ .op = "POPLN", .rest = "  " },
+            .pop => .{ .op = "POP", .rest = "" },
+            .pop_n => .{ .op = "POPN", .rest = "  " },
             .one => .{ .op = "ONE", .rest = "" },
             .neg_one => .{ .op = "NONE", .rest = "" },
             .true => .{ .op = "TRUE", .rest = "" },
@@ -145,11 +145,11 @@ pub const RareOp = enum(u8) {
     const16,
     const32,
 
-    /// GET a: a gives the index into the locals array to push onto the stack.
+    /// GET a: a gives the index into the stack to push onto the top.
     get16,
     get32,
 
-    // GETA a: a gives the index into the entire locals array to push onto the stack.
+    // GETA a: a gives the index into the entire stack to push onto the stop.
     geta16,
     geta32,
 
@@ -347,14 +347,14 @@ pub const Chunk = struct {
 
                     try self.constants.items[arg].print(writer);
                 },
-                .popl_n, .get8, .geta8, .set8, .jmp8, .jmpf8, .call => {
+                .pop_n, .get8, .geta8, .set8, .jmp8, .jmpf8, .call => {
                     const arg = try self.next(&i);
                     try op.print(writer);
                     try writer.print("{x:<4}", .{arg});
                 },
                 .one, .neg_one, .true, .false, .add, .subtract, .multiply, .divide, .negate => try op.print(writer),
                 .eq, .neq, .lt, .lte, .gt, .gte => try op.print(writer),
-                .popl, .ret => try op.print(writer),
+                .pop, .ret => try op.print(writer),
                 .rare => {
                     i += 1;
                     try self.disassembleRare(&i, writer);
@@ -405,8 +405,8 @@ test "disassemble" {
     try chunk.writeOp(.neg_one);
     try chunk.writeOp(.set8);
     try chunk.writeU8(1);
-    try chunk.writeOp(.popl);
-    try chunk.writeOp(.popl_n);
+    try chunk.writeOp(.pop);
+    try chunk.writeOp(.pop_n);
     try chunk.writeU8(5);
     try chunk.writeOp(.jmpf8);
     try chunk.writeU8(0);
@@ -420,8 +420,8 @@ test "disassemble" {
         \\ONE   
         \\NONE  
         \\SET    l1   
-        \\POPL  
-        \\POPLN   5   
+        \\POP   
+        \\POPN    5   
         \\JMPF   p0   
         \\JMP    p0   
         \\
