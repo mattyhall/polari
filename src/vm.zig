@@ -127,6 +127,16 @@ pub const Vm = struct {
 
                     try self.stack.append(self.gpa, self.locals.items[i]);
                 },
+                .geta8 => {
+                    if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
+                    const i = self.chunk.code.items[self.pc];
+                    self.pc += 1;
+                    if (i >= self.locals.items.len) {
+                        return error.UnknownLocal;
+                    }
+
+                    try self.stack.append(self.gpa, self.locals.items[i]);
+                },
                 .set8 => {
                     if (self.pc >= self.chunk.code.items.len) return error.CouldNotParse;
                     const i = self.chunk.code.items[self.pc] + self.localOffset();

@@ -9,6 +9,7 @@ pub const Compiler = struct {
     gpa: std.mem.Allocator,
     chunk: bc.Chunk,
     program: *const parser.Program,
+    parent: ?*Compiler = null,
 
     pub fn init(gpa: std.mem.Allocator, program: *const parser.Program) Compiler {
         return .{ .gpa = gpa, .chunk = bc.Chunk.init(gpa), .program = program };
@@ -29,19 +30,47 @@ pub const Compiler = struct {
         }
     }
 
-    fn writeLocal(self: *Compiler, i: enum { get, set }, v: u32) !void {
+    fn writeLocal(self: *Compiler, i: enum { get, geta, set }, v: u32) !void {
         if (v > std.math.maxInt(u16)) {
             try self.chunk.writeOp(.rare);
-            try self.chunk.writeRateOp(if (i == .get) .get32 else .set32);
+            try self.chunk.writeRateOp(switch (i) {
+                .get => .get32,
+                .geta => .geta32,
+                .set => .set32,
+            });
             try self.chunk.writeU32(@intCast(u32, v));
         } else if (v > std.math.maxInt(u8)) {
             try self.chunk.writeOp(.rare);
-            try self.chunk.writeRateOp(if (i == .get) .get16 else .set16);
+            try self.chunk.writeRateOp(switch (i) {
+                .get => .get16,
+                .geta => .geta16,
+                .set => .set16,
+            });
             try self.chunk.writeU16(@intCast(u16, v));
         } else {
-            try self.chunk.writeOp(if (i == .get) .get8 else .set8);
+            try self.chunk.writeOp(switch (i) {
+                .get => .get8,
+                .geta => .geta8,
+                .set => .set8,
+            });
             try self.chunk.writeU8(@intCast(u8, v));
         }
+    }
+
+    /// getLocalGlobal tries to find the local of the identifier by looking first in the current chunk's set of locals
+    /// and then finding the top level compiler and looking for it there otherwise.
+    fn getLocalOrGlobal(self: *Compiler, ident: []const u8) !void {
+        if (self.chunk.getLocal(ident)) |l| return try self.writeLocal(.get, l);
+
+        var last_parent = self;
+        var parent = self.parent;
+        while (parent) |p| {
+            last_parent = p;
+            parent = p.parent;
+        }
+
+        const local = last_parent.chunk.getLocal(ident) orelse return error.LocalNotFound;
+        try self.writeLocal(.geta, local);
     }
 
     fn compileExpression(self: *Compiler, expr: *const parser.Expression) !void {
@@ -51,7 +80,7 @@ pub const Compiler = struct {
             else
                 try self.writeConst(try self.chunk.addConstant(.{ .integer = i })),
             .boolean => |b| try self.chunk.writeOp(if (b) .true else .false),
-            .identifier => |n| try self.writeLocal(.get, self.chunk.getLocal(n) orelse unreachable),
+            .identifier => |n| try self.getLocalOrGlobal(n),
             .binop => |binop| {
                 try self.compileExpression(binop.lhs.inner);
                 try self.compileExpression(binop.rhs.inner);
@@ -104,6 +133,7 @@ pub const Compiler = struct {
                 var comp = Compiler{
                     .gpa = self.gpa,
                     .chunk = bc.Chunk.init(self.gpa),
+                    .parent = self,
                     .program = undefined,
                 };
 
@@ -131,7 +161,7 @@ pub const Compiler = struct {
         }
     }
 
-    fn compileFunction(self: *Compiler, name: []const u8, f: *const parser.Function) error{OutOfMemory}!bc.Value {
+    fn compileFunction(self: *Compiler, name: []const u8, f: *const parser.Function) error{ OutOfMemory, LocalNotFound }!bc.Value {
         // The rightmost argument is at the top of the stack which means we need to assign locals in reverse order.
         var current: u32 = undefined;
         for (f.params) |param| {

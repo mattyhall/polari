@@ -38,8 +38,10 @@ pub const Op = enum(u8) {
     /// CONST a: a gives the index into the constants array to push onto the stack.
     const8,
 
-    /// GET a: a gives the index into the locals array to push onto the stack.
+    /// GET a: a gives the index into this chunk's locals array to push onto the stack.
     get8,
+    // GETA a: a gives the index into the entire locals array to push onto the stack.
+    geta8,
     /// SET a: sets the local with index a to the value on the top of the stack.
     set8,
     /// POPL: pops a single local
@@ -107,6 +109,7 @@ pub const Op = enum(u8) {
         var s: struct { op: []const u8, rest: []const u8 } = switch (self) {
             .const8 => .{ .op = "CONST", .rest = " c" },
             .get8 => .{ .op = "GET", .rest = " l" },
+            .geta8 => .{ .op = "GETA", .rest = " l" },
             .set8 => .{ .op = "SET", .rest = " l" },
             .popl => .{ .op = "POPL", .rest = "" },
             .popl_n => .{ .op = "POPLN", .rest = "  " },
@@ -146,6 +149,10 @@ pub const RareOp = enum(u8) {
     get16,
     get32,
 
+    // GETA a: a gives the index into the entire locals array to push onto the stack.
+    geta16,
+    geta32,
+
     /// SET a: sets the local with index a to the value on the top of the stack.
     set16,
     set32,
@@ -162,6 +169,7 @@ pub const RareOp = enum(u8) {
         var s: struct { op: []const u8, rest: []const u8 } = switch (self) {
             .const16, .const32 => .{ .op = "CONST", .rest = " c" },
             .get16, .get32 => .{ .op = "GET", .rest = " l" },
+            .geta16, .geta32 => .{ .op = "GETA", .rest = " l" },
             .set16, .set32 => .{ .op = "SET", .rest = " l" },
             .jmp16, .jmp32 => .{ .op = "JMP", .rest = " p" },
             .jmpf16, .jmpf32 => .{ .op = "JMPF", .rest = " p" },
@@ -292,13 +300,13 @@ pub const Chunk = struct {
         i.* += 1;
 
         var arg = switch (op) {
-            .const16, .get16, .set16, .jmp16, .jmpf16 => b: {
+            .const16, .get16, .geta16, .set16, .jmp16, .jmpf16 => b: {
                 var fbs = std.io.fixedBufferStream(self.code.items[i.*..]);
                 const arg = try fbs.reader().readIntLittle(u16);
                 i.* = i.* + 1;
                 break :b @intCast(usize, arg);
             },
-            .const32, .get32, .set32, .jmp32, .jmpf32 => b: {
+            .const32, .get32, .geta32, .set32, .jmp32, .jmpf32 => b: {
                 var fbs = std.io.fixedBufferStream(self.code.items[i.*..]);
                 const arg = try fbs.reader().readIntLittle(u32);
                 i.* = i.* + 3;
@@ -339,7 +347,7 @@ pub const Chunk = struct {
 
                     try self.constants.items[arg].print(writer);
                 },
-                .popl_n, .get8, .set8, .jmp8, .jmpf8, .call => {
+                .popl_n, .get8, .geta8, .set8, .jmp8, .jmpf8, .call => {
                     const arg = try self.next(&i);
                     try op.print(writer);
                     try writer.print("{x:<4}", .{arg});

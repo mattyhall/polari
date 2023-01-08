@@ -188,6 +188,9 @@ fn reorder(program: *parser.Program) !void {
         var ignore = std.ArrayListUnmanaged([]const u8){};
         errdefer ignore.deinit(a);
 
+        if (stmt.inner.assignment.expression.inner.* == .function)
+            try ignore.append(a, stmt.inner.assignment.identifier);
+
         try getIdentifiers(a, stmt.inner.assignment.expression.inner, &deps, &ignore);
         try nodes.append(a, .{
             .ident = stmt.inner.assignment.identifier,
@@ -1102,6 +1105,13 @@ test "reorder assignments" {
     try testNormalised("a = fn x y => x + y; x = 10;",
         \\a = (fn [x y] (+ x y));
         \\x = 10;
+        \\
+    );
+}
+
+test "reorder allows functions to refer to themselves" {
+    try testNormalised("a = fn x y => a x y;",
+        \\a = (fn [x y] (a x y));
         \\
     );
 }
