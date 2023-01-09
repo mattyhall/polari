@@ -12,26 +12,52 @@ pub const Local = struct {
 /// Locals store the local variables in the chunk.
 pub const Locals = std.ArrayListUnmanaged(Local);
 
+/// Object represents boxed values.
+///
+/// NOTE: Defined as a struct with one field because when we implement a GC then we will need to add further fields.
+pub const Object = struct {
+    v: union(enum) {
+        function: struct { chunk: Chunk, arity: u32, name: []const u8 },
+    },
+
+    fn print(self: *Object, w: anytype) !void {
+        switch (self.v) {
+            .function => |f| try w.print("<func {s}>", .{f.name}),
+        }
+    }
+
+    fn deinit(self: *Object) void {
+        switch (self.v) {
+            .function => |*f| f.chunk.deinit(),
+        }
+    }
+};
+
 pub const Value = union(enum) {
     integer: i64,
     boolean: bool,
-    function: struct { chunk: Chunk, arity: u32, name: []const u8 },
+    object: *Object,
 
     pub fn print(self: Value, w: anytype) !void {
         switch (self) {
             .integer => |i| try w.print("{}", .{i}),
             .boolean => |b| try w.print("{}", .{b}),
-            .function => |f| try w.print("<func {s}>", .{f.name}),
+            .object => |o| try o.print(w),
         }
     }
 
     pub fn deinit(self: *Value) void {
         switch (self.*) {
-            .function => |*f| f.chunk.deinit(),
+            .object => |o| o.deinit(),
             else => {},
         }
     }
 };
+
+comptime {
+    // Need 8 bytes for a pointer/i64, u2 for the tag and it will then be aligned to 8byte boundaries
+    std.debug.assert(@sizeOf(Value) == 16);
+}
 
 /// Op lists the most common bytecode operations.
 pub const Op = enum(u8) {
@@ -328,10 +354,12 @@ pub const Chunk = struct {
     /// disassemble writes the disassembled output of the chunk to writer.
     pub fn disassemble(self: *const Chunk, writer: anytype) !void {
         for (self.constants.items) |v| switch (v) {
-            .function => |f| {
-                try writer.print("============ {s} ============\n", .{f.name});
-                try f.chunk.disassemble(writer);
-                try writer.writeAll("============================\n");
+            .object => |o| switch (o.v) {
+                .function => |f| {
+                    try writer.print("============ {s} ============\n", .{f.name});
+                    try f.chunk.disassemble(writer);
+                    try writer.writeAll("============================\n");
+                },
             },
             else => {},
         };

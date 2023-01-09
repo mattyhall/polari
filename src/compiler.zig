@@ -167,7 +167,9 @@ pub const Compiler = struct {
         try self.compileExpression(f.body.inner);
         try self.chunk.writeOp(.ret);
 
-        return bc.Value{ .function = .{ .chunk = self.chunk, .arity = @intCast(u32, f.params.len), .name = name } };
+        var fun = try self.gpa.create(bc.Object);
+        fun.* = .{ .v = .{ .function = .{ .chunk = self.chunk, .arity = @intCast(u32, f.params.len), .name = name } } };
+        return bc.Value{ .object = fun };
     }
 
     pub fn compile(self: *Compiler) !void {

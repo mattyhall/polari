@@ -168,7 +168,9 @@ pub const Vm = struct {
                     try self.pushFrame(args);
 
                     var v = switch (self.stack.items[self.stack.items.len - 1 - args]) {
-                        .function => |f| f,
+                        .object => |o| switch (o.v) {
+                            .function => |f| f,
+                        },
                         else => return error.CouldNotParse,
                     };
 
