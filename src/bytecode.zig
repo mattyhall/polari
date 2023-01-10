@@ -28,7 +28,11 @@ pub const Object = struct {
 
     fn deinit(self: *Object) void {
         switch (self.v) {
-            .function => |*f| f.chunk.deinit(),
+            .function => |*f| {
+                var gpa = f.chunk.gpa;
+                f.chunk.deinit();
+                gpa.destroy(f);
+            },
         }
     }
 };

@@ -313,7 +313,10 @@ test "functions" {
     var chunk = bc.Chunk.init(testing.allocator);
     defer chunk.deinit();
 
-    _ = try chunk.addConstant(.{ .function = .{ .chunk = f_chunk, .name = "", .arity = 2 } });
+    var o = try testing.allocator.create(bc.Object);
+    o.* = .{ .v = .{ .function = .{ .chunk = f_chunk, .name = "", .arity = 2 } } };
+
+    _ = try chunk.addConstant(.{ .object = o });
     try chunk.writeOp(.const8);
     try chunk.writeU8(0);
     try chunk.writeOp(.one);
