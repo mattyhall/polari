@@ -22,7 +22,7 @@
     flake-utils.lib.eachSystem (builtins.attrNames zig.packages) (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        zigLatest = zig.packages.${system}.master-2022-12-21;
+        zigLatest = zig.packages.${system}.master;
         gems = pkgs.ruby.withPackages (ps: with ps; [ rouge ]);
         inherit (gitignore.lib) gitignoreSource;
       in
