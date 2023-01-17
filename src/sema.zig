@@ -259,984 +259,242 @@ pub fn normaliseProgram(program: *parser.Program) !void {
     try reorder(program);
 }
 
-fn hashFn(comptime Context: type) (fn (Context, Variable) u64) {
-    return struct {
-        fn hash(_: Context, v: Variable) u64 {
-            return switch (v) {
-                .id => |i| @intCast(u64, i),
-                .expr => |e| @intCast(u64, @ptrToInt(e)),
-            };
-        }
-    }.hash;
-}
+/// BuiltinType represents a common, builtin type of a language - e.g. numbers, booleans etc.
+const BuiltinType = enum {
+    int,
+    boolean,
 
-fn eqlFn(comptime Context: type) (fn (Context, Variable, Variable) bool) {
-    return struct {
-        fn eql(_: Context, lhs: Variable, rhs: Variable) bool {
-            if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+    pub fn format(self: *const BuiltinType, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = opts;
+        _ = fmt;
 
-            return switch (lhs) {
-                .id => |i| i == rhs.id,
-                .expr => |e| e == rhs.expr,
-            };
-        }
-    }.eql;
-}
-
-const MapContext = struct {
-    pub const hash = hashFn(@This());
-    pub const eql = eqlFn(@This());
+        return switch (self.*) {
+            .int => writer.writeAll("Int"),
+            .boolean => writer.writeAll("Boolean"),
+        };
+    }
 };
 
-const Type = union(enum) {
-    bool,
-    int,
-    function: struct { params: []const Type, ret: *Type },
-    unknown,
-    errored,
+const Variable = usize;
 
-    pub fn eql(lhs: Type, rhs: Type) bool {
+const Constructor = []const u8;
+
+/// Type represents a fully known type. It is the result of the inference done in `Sema`.
+const Type = union(enum) {
+    /// builtin is for a know, built into the language type - e.g. Int.
+    builtin: BuiltinType,
+
+    /// construct is for a type which is made from another type - e.g. `Maybe a` (a maybe that stores any type)
+    /// `(->) Int Bool` (a function from int to boolean).
+    construct: struct { constructor: Constructor, args: []Type },
+
+    /// generic is for when what this type has been assigned to can take any type - e.g. [a] could be a list of ints,
+    /// bools, `Maybe Int`s etc.
+    generic: Variable,
+
+    fn deinit(self: *Type, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .construct => |c| {
+                for (c.args) |*arg| arg.deinit(gpa);
+                gpa.free(c.args);
+            },
+            .builtin, .generic => {},
+        }
+    }
+};
+
+/// TypeVar is something which is given to everything (i.e. expressions and variables) which can have a type. That type
+/// may be known (e.g. Int, Maybe Bool), or not.
+const TypeVar = union(enum) {
+    /// builtin is assigned when we know the type of what is given this typevar and it is a builtin type.
+    builtin: BuiltinType,
+
+    /// construct is assigned when we know at least the "shape" of what was given this typevar. E.g. a Maybe Int or a
+    /// function (which has constructor "->") of two unknown types.
+    construct: struct { constructor: Constructor, args: []TypeVar },
+
+    /// variable is for an unknown type.
+    variable: Variable,
+
+    fn eql(lhs: TypeVar, rhs: TypeVar) bool {
         if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+
         return switch (lhs) {
-            .int, .bool => true,
-            .errored => true,
-            .unknown => false,
-            .function => |f| b: {
-                const rhs_f = rhs.function;
-                if (f.params.len != rhs_f.params.len) break :b false;
-                for (f.params) |p, i| {
-                    if (!p.eql(rhs_f.params[i])) break :b false;
+            .builtin => |b| b == rhs.builtin,
+            .construct => |c| {
+                if (!std.mem.eql(u8, c.constructor, rhs.construct.constructor)) return false;
+
+                if (c.args.len != rhs.construct.args.len) return false;
+                for (c.args) |lhs_arg, i| {
+                    const rhs_arg = rhs.construct.args[i];
+                    if (!lhs_arg.eql(rhs_arg)) return false;
                 }
 
-                break :b f.ret.eql(rhs_f.ret.*);
+                return true;
             },
+            .variable => |v| v == rhs.variable,
         };
     }
 
-    pub fn clone(self: Type, gpa: std.mem.Allocator) !Type {
-        switch (self) {
-            .int, .bool, .unknown, .errored => return self,
-            .function => |f| {
-                var params = try gpa.alloc(Type, f.params.len);
-                errdefer gpa.free(params);
-                std.mem.copy(Type, params, f.params);
-
-                var ret = try gpa.create(Type);
-                errdefer gpa.destroy(ret);
-                ret.* = f.ret.*;
-
-                return .{ .function = .{ .params = params, .ret = ret } };
+    fn deinit(self: *TypeVar, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .construct => |c| {
+                for (c.args) |*arg| arg.deinit(gpa);
+                gpa.free(c.args);
             },
-        }
-    }
-
-    fn write(self: Type, writer: anytype) !void {
-        switch (self) {
-            .bool => try writer.writeAll("Bool"),
-            .int => try writer.writeAll("Int"),
-            .function => |f| {
-                try writer.writeAll("Fn [");
-                for (f.params) |param, i| {
-                    try param.write(writer);
-                    if (i < f.params.len - 1) try writer.writeAll(" ");
-                }
-                try writer.writeAll("] ");
-
-                try f.ret.write(writer);
-            },
-            .unknown => try writer.writeAll("???"),
-            .errored => try writer.writeAll("XXX"),
-        }
-    }
-
-    fn deinit(self: Type, gpa: std.mem.Allocator) void {
-        if (self != .function) return;
-        gpa.free(self.function.params);
-        gpa.destroy(self.function.ret);
-    }
-};
-
-const Id = u32;
-
-/// Variable represents something that can be given a type.
-const Variable = union(enum) {
-    /// id is the Id of an identifier in the program.
-    id: Id,
-    expr: *const Expression,
-
-    fn write(self: Variable, writer: anytype) !void {
-        switch (self) {
-            .id => |i| try writer.print("<{}>", .{i}),
-            .expr => |e| try e.write(writer),
+            .builtin, .variable => {},
         }
     }
 };
 
-const TypeMap = std.HashMapUnmanaged(Variable, Type, MapContext, std.hash_map.default_max_load_percentage);
-const VarMap = std.StringHashMapUnmanaged(Id);
-const LocMap = std.HashMapUnmanaged(Variable, Loc, MapContext, std.hash_map.default_max_load_percentage);
+/// A Constraint of `lhs`, `rhs` means that both `lhs` and `rhs` must have the same type. This can be a trivial
+/// constraint (e.g `Int ~ Int`), one where one side is unknown (e.g `t0 ~ Int` - meaning t0 must have the type Int) or
+/// one where both sides are unknown (`t0 ~ t1`).
+const Constraint = struct {
+    lhs: TypeVar,
+    rhs: TypeVar,
 
-/// Unification means that the type of lhs should be found by the rhs rule.
-const Unification = struct { lhs: Variable, rhs: Rule };
+    /// provenance corresponds to the expression that this constraint came from. It is stored to enable error
+    /// reporting.
+    provenance: *const Expression,
 
-/// A rule is some way of finding a type given other variables.
-const Rule = union(enum) {
-    /// function gives the parameters and return type of a function.
-    function: struct { params: []const Variable, ret: Variable },
+    pub fn format(self: *const Constraint, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = opts;
+        _ = fmt;
 
-    /// number_of_params means the function f must have n parameters.
-    number_of_params: struct { f: Variable, n: u32, loc: Loc },
+        try writer.print("{} ~ {}", .{ self.lhs, self.rhs });
+    }
 
-    /// f is a function and we should have the same type as the parameter with index param.
-    parameter: struct { param: u32, f: Variable },
-
-    /// Variable is a function and we should have the same type as its return.
-    ret: Variable,
-
-    /// We should have the same type as Variable.
-    variable: Variable,
-
-    /// We should have type typ.
-    typ: Type,
-
-    fn write(self: Rule, writer: anytype) !void {
-        switch (self) {
-            .function => |f| {
-                try writer.writeAll("Function of [");
-                for (f.params) |param, i| {
-                    try param.write(writer);
-                    if (i < f.params.len - 1) try writer.writeAll(" ");
-                }
-
-                try writer.writeAll("] to ");
-                try f.ret.write(writer);
-            },
-            .number_of_params => |n| {
-                try writer.writeAll("Function ");
-                try n.f.write(writer);
-                try writer.print(" must have {} parameter(s)", .{n.n});
-            },
-            .parameter => |p| {
-                try writer.print("Parameter {} of ", .{p.param});
-                try p.f.write(writer);
-            },
-            .ret => |v| {
-                try writer.writeAll("Return type of ");
-                try v.write(writer);
-            },
-            .variable => |v| try v.write(writer),
-            .typ => |t| try t.write(writer),
-        }
+    fn deinit(self: *Constraint, gpa: std.mem.Allocator) void {
+        self.lhs.deinit(gpa);
+        self.rhs.deinit(gpa);
     }
 };
 
+/// Substitution of two variables (`lhs` and `rhs`) means wherever we see `lhs` we can instead put `rhs`, and vice
+/// versa.
+const Substitution = struct {
+    lhs: TypeVar,
+    rhs: TypeVar,
+
+    pub fn format(self: *const Substitution, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = opts;
+        _ = fmt;
+
+        return writer.print("{} := {}", .{ self.lhs, self.rhs });
+    }
+};
+
+/// Sema implements type checking of Polari code. It is done per-decl (i.e. the type of a decl depends only on its
+/// definition) and consists of two phases:
+///   1. Give the body and its expressions type variables and _generate constraints_
+///   2. _Solve_ the constraints using unification.
+///
+/// Currently we just check the types and infer any unknown ones. We do not annotate the AST with the types (also known
+/// as _elaborating_ the program). This may be added in the future.
 pub const Sema = struct {
+    /// gpa is a general purpose allocator and is used to allocate any value that is to be returned.
     gpa: std.mem.Allocator,
-    debug: bool,
-    current_id: Id,
-    made_progress: bool,
-    /// types maps variables to their types.
-    types: TypeMap,
-    /// var_maps is a list of VarMaps: a map from an identifier to an Id.
-    var_maps: std.ArrayListUnmanaged(VarMap),
-    unifications: std.ArrayListUnmanaged(Unification),
-    /// locations maps Variables to their locations.
-    locations: LocMap,
-    diags: std.ArrayListUnmanaged(Diag),
 
-    const plusId = 0;
-    const subId = 1;
-    const multId = 2;
-    const divId = 3;
-    const cmpId = 4;
-    const negateId = 5;
+    /// arena is used for short lived allocations which span only the length of time of a decl.
+    arena: std.heap.ArenaAllocator,
+
+    /// decl_types stores the types of all decls in the program. It is allocated using `gpa`.
+    decl_types: std.StringHashMapUnmanaged(Type),
+
+    /// expr_type_vars stores the variable for every expression in the current decl.
+    expr_type_vars: std.AutoHashMapUnmanaged(*const Expression, Variable),
+
+    /// constraints stores all the constraints for the current decl as well as any unsolved constraints for previous
+    /// ones. It does the latter to enable type errors to be reported once as much of the program has been type checked
+    /// as possible.
+    constraints: std.ArrayListUnmanaged(Constraint),
+
+    /// substitutions is a list of all substitutions for the current decl.
+    substitutions: std.ArrayListUnmanaged(Substitution),
+
+    /// next_var holds the next typevar to give out.
+    next_var: usize,
+
+    /// debug determines whether we dump debug infor
+    debug: bool,
 
     pub fn init(gpa: std.mem.Allocator, debug: bool) Sema {
         return .{
             .gpa = gpa,
+            .arena = std.heap.ArenaAllocator.init(gpa),
+            .decl_types = .{},
+            .expr_type_vars = .{},
+            .constraints = .{},
+            .substitutions = .{},
+            .next_var = 0,
             .debug = debug,
-            .current_id = 0,
-            .made_progress = true,
-            .types = .{},
-            .var_maps = .{},
-            .unifications = .{},
-            .locations = .{},
-            .diags = .{},
         };
     }
 
-    /// id generates a new Id for an identifier.
-    fn id(self: *Sema) Id {
-        self.current_id += 1;
-        return self.current_id - 1;
-    }
+    /// printVars will output the typevars in a human readable format to stderr.
+    fn printVars(self: *const Sema) !void {
+        std.debug.print("####################################\n", .{});
+        std.debug.print("=============== VARS ===============\n", .{});
 
-    fn currentVarMap(self: *Sema) *VarMap {
-        return &self.var_maps.items[self.var_maps.items.len - 1];
-    }
-
-    fn allocDiag(self: *Sema, loc: lexer.Loc, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
-        const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
-        try self.diags.append(self.gpa, Diag{ .msg = msg, .allocator = self.gpa, .loc = loc });
-    }
-
-    /// prepopulate adds the types of builtin functions.
-    pub fn prepopulate(self: *Sema) error{OutOfMemory}!void {
-        try self.var_maps.append(self.gpa, .{});
-
-        const ops = [_][]const u8{ "+", "-", "*", "/", "<cmp>" };
-
-        try self.types.ensureUnusedCapacity(self.gpa, ops.len);
-        try self.currentVarMap().ensureUnusedCapacity(self.gpa, ops.len);
-
-        for (ops) |op| {
-            var params = try self.gpa.alloc(Type, 2);
-            errdefer self.gpa.free(params);
-            params[0] = .int;
-            params[1] = .int;
-
-            var ret = try self.gpa.create(Type);
-            errdefer self.gpa.destroy(ret);
-            ret.* = if (std.mem.eql(u8, "<cmp>", op)) .bool else .int;
-
-            var t = .{ .function = .{ .ret = ret, .params = params } };
-
-            const op_id = self.id();
-            self.types.putAssumeCapacity(.{ .id = op_id }, t);
-
-            self.currentVarMap().putAssumeCapacity(op, op_id);
-        }
+        var writer = std.io.getStdErr().writer();
 
         {
-            var params = try self.gpa.alloc(Type, 1);
-            params[0] = .int;
-
-            var ret = try self.gpa.create(Type);
-            ret.* = .int;
-
-            var t = .{ .function = .{ .ret = ret, .params = params } };
-
-            const op_id = self.id();
-            self.types.putAssumeCapacity(.{ .id = op_id }, t);
-
-            self.currentVarMap().putAssumeCapacity("<negate>", op_id);
-        }
-    }
-
-    /// findIdentifier finds the Id of ident.
-    fn findIdentifier(self: *const Sema, ident: []const u8) ?Id {
-        var i = self.var_maps.items.len - 1;
-        while (true) : (i -= 1) {
-            var map = self.var_maps.items[i];
-            if (map.get(ident)) |ident_id| return ident_id;
-            if (i == 0) return null;
-        }
-    }
-
-    pub fn writeState(self: *const Sema, writer: anytype) !void {
-        try writer.writeAll("============================\n");
-
-        try writer.writeAll("=========== Types ==========\n");
-        {
-            var it = self.types.iterator();
+            var it = self.expr_type_vars.iterator();
             while (it.next()) |entry| {
-                try entry.key_ptr.write(writer);
-                try writer.writeAll(" => ");
-                try entry.value_ptr.write(writer);
-                try writer.writeAll("\n");
-            }
-        }
-
-        try writer.writeAll("======= Unifications =======\n");
-        for (self.unifications.items) |unif| {
-            try unif.lhs.write(writer);
-            try writer.writeAll(" : ");
-            try unif.rhs.write(writer);
-            try writer.writeAll("\n");
-        }
-    }
-
-    fn generateRulesForApply(self: *Sema, f: Variable, args: []const Variable, expr: Variable, loc: Loc) !void {
-        try self.unifications.ensureUnusedCapacity(self.gpa, 2 + args.len);
-
-        self.unifications.appendAssumeCapacity(.{
-            .lhs = expr,
-            .rhs = .{ .number_of_params = .{ .f = f, .n = @intCast(u32, args.len), .loc = loc } },
-        });
-
-        self.unifications.appendAssumeCapacity(.{ .lhs = expr, .rhs = .{ .ret = f } });
-
-        for (args) |arg, i| {
-            self.unifications.appendAssumeCapacity(.{
-                .lhs = arg,
-                .rhs = .{ .parameter = .{ .param = @intCast(u32, i), .f = f } },
-            });
-        }
-    }
-
-    /// generateRulesForExpression generates unifications for the given expression.
-    fn generateRulesForExpression(self: *Sema, loc: Loc, expr: *const Expression) !void {
-        const v = Variable{ .expr = expr };
-        try self.locations.put(self.gpa, v, loc);
-
-        switch (expr.*) {
-            .integer => {
-                try self.types.put(self.gpa, v, .int);
-                return;
-            },
-            .boolean => {
-                try self.types.put(self.gpa, v, .bool);
-                return;
-            },
-            else => try self.types.put(self.gpa, v, .unknown),
-        }
-
-        switch (expr.*) {
-            .integer, .boolean => unreachable,
-            .identifier => |i| {
-                const ident_id = self.findIdentifier(i) orelse {
-                    try self.allocDiag(loc, "could not find variable {s}", .{i});
-                    try self.setType(v, .errored);
-                    return error.CouldNotFindVariable;
-                };
-
-                try self.unifications.append(self.gpa, .{
-                    .lhs = v,
-                    .rhs = .{ .variable = .{ .id = ident_id } },
-                });
-            },
-            .unaryop => |unaryop| {
-                try self.generateRulesForExpression(unaryop.e.loc, unaryop.e.inner);
-
-                switch (unaryop.op) {
-                    .grouping => try self.unifications.append(
-                        self.gpa,
-                        .{ .lhs = v, .rhs = .{ .variable = .{ .expr = unaryop.e.inner } } },
-                    ),
-                    .negate => try self.generateRulesForApply(
-                        .{ .id = negateId },
-                        &[_]Variable{.{ .expr = unaryop.e.inner }},
-                        v,
-                        loc,
-                    ),
-                }
-            },
-            .binop => |binop| {
-                try self.generateRulesForExpression(binop.lhs.loc, binop.lhs.inner);
-                try self.generateRulesForExpression(binop.rhs.loc, binop.rhs.inner);
-
-                var op_id: Id = switch (binop.op) {
-                    .plus => plusId,
-                    .minus => subId,
-                    .multiply => multId,
-                    .divide => divId,
-                    .eq, .neq, .lt, .lte, .gt, .gte => cmpId,
-                    .apply => @panic("not implemented"),
-                };
-
-                try self.generateRulesForApply(
-                    .{ .id = op_id },
-                    &[_]Variable{ .{ .expr = binop.lhs.inner }, .{ .expr = binop.rhs.inner } },
-                    v,
-                    loc,
-                );
-            },
-            .let => |let| {
-                try self.beginScope();
-                defer self.endScope();
-
-                for (let.assignments) |ass| {
-                    if (self.currentVarMap().contains(ass.inner.identifier)) {
-                        try self.allocDiag(ass.loc, "redefinition of {s}", .{ass.inner.identifier});
-                        try self.setType(.{ .id = self.currentVarMap().get(ass.inner.identifier) orelse unreachable }, .errored);
-                        continue;
-                    }
-
-                    const ass_id = self.id();
-                    const ass_v = Variable{ .id = ass_id };
-                    try self.currentVarMap().put(self.gpa, ass.inner.identifier, ass_id);
-
-                    switch (ass.inner.expression.inner.*) {
-                        .integer => try self.types.put(self.gpa, ass_v, .int),
-                        .boolean => try self.types.put(self.gpa, ass_v, .bool),
-                        else => {
-                            try self.types.put(self.gpa, ass_v, .unknown);
-
-                            try self.generateRulesForExpression(ass.inner.expression.loc, ass.inner.expression.inner);
-                            try self.unifications.append(self.gpa, .{
-                                .lhs = .{ .id = ass_id },
-                                .rhs = .{ .variable = .{ .expr = ass.inner.expression.inner } },
-                            });
-                        },
-                    }
-                }
-
-                try self.generateRulesForExpression(let.in.loc, let.in.inner);
-                try self.unifications.append(self.gpa, .{
-                    .lhs = v,
-                    .rhs = .{ .variable = .{ .expr = let.in.inner } },
-                });
-            },
-            .function => |f| {
-                try self.beginScope();
-                defer self.endScope();
-
-                var al = try std.ArrayListUnmanaged(Variable).initCapacity(self.gpa, f.params.len);
-                errdefer al.deinit(self.gpa);
-
-                for (f.params) |param| {
-                    const param_id = self.id();
-                    try self.currentVarMap().put(self.gpa, param.inner.identifier, param_id);
-                    try self.types.put(self.gpa, .{ .id = param_id }, .unknown);
-                    al.appendAssumeCapacity(.{ .id = param_id });
-                }
-
-                try self.generateRulesForExpression(f.body.loc, f.body.inner);
-                try self.unifications.append(self.gpa, .{ .lhs = v, .rhs = .{ .function = .{
-                    .params = try al.toOwnedSlice(self.gpa),
-                    .ret = .{ .expr = f.body.inner },
-                } } });
-            },
-            .apply => |a| {
-                try self.generateRulesForExpression(a.f.loc, a.f.inner);
-
-                var args = try self.gpa.alloc(Variable, a.args.len);
-                defer self.gpa.free(args);
-
-                for (a.args) |arg, i| {
-                    args[i] = .{ .expr = arg.inner };
-                    try self.generateRulesForExpression(arg.loc, arg.inner);
-                }
-
-                try self.generateRulesForApply(.{ .expr = a.f.inner }, args, v, loc);
-            },
-            .@"if" => |f| {
-                try self.generateRulesForExpression(f.condition.loc, f.condition.inner);
-                try self.generateRulesForExpression(f.then.loc, f.then.inner);
-                try self.generateRulesForExpression(f.@"else".loc, f.@"else".inner);
-
-                try self.unifications.ensureUnusedCapacity(self.gpa, 4);
-                self.unifications.appendAssumeCapacity(.{
-                    .lhs = .{ .expr = f.condition.inner },
-                    .rhs = .{ .typ = .bool },
-                });
-                self.unifications.appendAssumeCapacity(.{
-                    .lhs = .{ .expr = f.then.inner },
-                    .rhs = .{ .variable = .{ .expr = f.@"else".inner } },
-                });
-                self.unifications.appendAssumeCapacity(.{
-                    .lhs = v,
-                    .rhs = .{ .variable = .{ .expr = f.then.inner } },
-                });
-                self.unifications.appendAssumeCapacity(.{
-                    .lhs = v,
-                    .rhs = .{ .variable = .{ .expr = f.@"else".inner } },
-                });
-            },
-        }
-    }
-
-    /// generateRules generates unifications for the given program.
-    pub fn generateRules(self: *Sema, program: *const parser.Program) !void {
-        // Add top-level variables so that they don't need to be in a certain order to type check. E.g. a=b;b=1; should
-        // be valid.
-        for (program.stmts.items) |stmt| {
-            var a = if (stmt.inner == .assignment) stmt.inner.assignment else continue;
-
-            if (self.currentVarMap().contains(a.identifier)) {
-                try self.allocDiag(stmt.loc, "redefinition of {s}", .{a.identifier});
-                try self.setType(.{ .id = self.currentVarMap().get(a.identifier) orelse unreachable }, .errored);
-                continue;
-            }
-
-            const a_id = self.id();
-            try self.currentVarMap().put(self.gpa, a.identifier, a_id);
-            try self.types.put(self.gpa, .{ .id = a_id }, .unknown);
-        }
-
-        for (program.stmts.items) |stmt| {
-            switch (stmt.inner) {
-                .expression => |e| try self.generateRulesForExpression(stmt.loc, e),
-                .assignment => |a| {
-                    const a_id = self.findIdentifier(a.identifier) orelse unreachable;
-                    try self.currentVarMap().put(self.gpa, a.identifier, a_id);
-                    const entry = self.types.getEntry(.{ .id = a_id }) orelse unreachable;
-
-                    switch (a.expression.inner.*) {
-                        .integer => entry.value_ptr.* = .int,
-                        .boolean => entry.value_ptr.* = .bool,
-                        else => {
-                            try self.generateRulesForExpression(a.expression.loc, a.expression.inner);
-                            try self.unifications.append(self.gpa, .{
-                                .lhs = .{ .id = a_id },
-                                .rhs = .{ .variable = .{ .expr = a.expression.inner } },
-                            });
-                        },
-                    }
-                },
-            }
-        }
-
-        if (self.debug) {
-            var w = std.io.getStdErr().writer();
-            var it = self.currentVarMap().iterator();
-            try w.writeAll("======================\n");
-            while (it.next()) |entry| {
-                try w.print("{s} => <{}>\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+                try Expression.write(entry.key_ptr.*, writer);
+                // try entry.key_ptr.write(writer);
+                std.debug.print(": {}\n", .{entry.value_ptr.*});
             }
         }
     }
 
-    /// setType sets the type of v to t if it was previously unknown, otherwise it checks that t is the same as v's
-    /// type.
-    fn setType(self: *Sema, v: Variable, t: Type) !void {
-        var e = self.types.getEntry(v) orelse unreachable;
-        if (e.value_ptr.* == .unknown) {
-            e.value_ptr.* = t;
-            self.made_progress = true;
-            return;
-        }
-
-        if (!e.value_ptr.eql(t)) {
-            const loc = self.locations.get(v) orelse Loc{};
-            try self.allocDiag(loc, "type mismatch: expected {}, got {}", .{ t, e.value_ptr.* });
-            return;
-        }
-
-        self.made_progress = true;
-    }
-
-    /// beginScope adds a new VarMap to the var_maps array. This is so we can do shadowing.
-    fn beginScope(self: *Sema) !void {
-        try self.var_maps.append(self.gpa, .{});
-    }
-
-    /// endScope removes and frees the last VarMap in var_maps. If debug mode is on it also dumps the VarMap to stderr.
-    fn endScope(self: *Sema) void {
-        var map = self.var_maps.pop();
-        defer map.deinit(self.gpa);
-
-        if (self.debug) {
-            var w = std.io.getStdErr().writer();
-            var it = map.iterator();
-            w.writeAll("======================\n") catch unreachable;
-            while (it.next()) |entry| {
-                w.print("{s} => <{}>\n", .{ entry.key_ptr.*, entry.value_ptr.* }) catch unreachable;
-            }
+    /// printConstraints will output the constraints in a human readable format to stderr.
+    fn printConstraints(self: *const Sema) !void {
+        std.debug.print("============ CONSTRAINT ============\n", .{});
+        for (self.constraints.items) |constraint| {
+            std.debug.print("{}\n", .{constraint});
         }
     }
 
-    /// unifyVariables sets the type of a to the type of be if b is resolved.
-    fn unifyVariables(self: *Sema, a: Variable, b: Variable) !bool {
-        const t = self.types.get(b) orelse unreachable;
-        switch (t) {
-            .unknown => return false,
-            else => {
-                try self.setType(a, try t.clone(self.gpa));
-                return true;
-            },
+    /// preopulate inserts builtin decls (e.g. the maths operations) into decl_types.
+    fn prepopulate(self: *Sema) !void {
+        try self.decl_types.ensureUnusedCapacity(self.gpa, 4);
+
+        for (&[_][]const u8{ "+", "-", "*", "/" }) |op| {
+            var args = try self.gpa.alloc(Type, 3);
+            errdefer self.gpa.free(args);
+            args[0] = .{ .builtin = .int };
+            args[1] = .{ .builtin = .int };
+            args[2] = .{ .builtin = .int };
+
+            const math_binop_ty = Type{ .construct = .{ .constructor = "->", .args = args } };
+            self.decl_types.putAssumeCapacity(op, math_binop_ty);
         }
     }
 
-    pub fn solveIter(self: *Sema) !void {
-        var i: usize = 0;
-        while (i < self.unifications.items.len) {
-            const unif = self.unifications.items[i];
-            i += 1;
+    /// infer infers the type of all expressions in `program` and type checks them.
+    pub fn infer(self: *Sema, program: *const parser.Program) !void {
+        _ = program;
 
-            switch (unif.rhs) {
-                .variable => |v| {
-                    if (!try self.unifyVariables(unif.lhs, v) and !try self.unifyVariables(v, unif.lhs)) continue;
-                    i -= 1;
-                    _ = self.unifications.swapRemove(i);
-                },
-                .function => |f| b: {
-                    var al = std.ArrayListUnmanaged(Type){};
-                    errdefer al.deinit(self.gpa);
-
-                    for (f.params) |param| {
-                        const t = self.types.get(param) orelse unreachable;
-                        switch (t) {
-                            .unknown => break :b,
-                            else => try al.append(self.gpa, t),
-                        }
-                    }
-
-                    const t = self.types.get(f.ret) orelse unreachable;
-                    if (t == .unknown or t == .errored) break :b;
-
-                    var t_allocced = try self.gpa.create(Type);
-                    errdefer self.gpa.destroy(t_allocced);
-                    t_allocced.* = t;
-
-                    try self.setType(unif.lhs, .{
-                        .function = .{ .params = try al.toOwnedSlice(self.gpa), .ret = t_allocced },
-                    });
-
-                    self.gpa.free(f.params);
-                    i -= 1;
-                    _ = self.unifications.swapRemove(i);
-                },
-                .number_of_params => |n| {
-                    const t = switch (self.types.get(n.f) orelse unreachable) {
-                        .unknown => continue,
-                        .function => |f| f,
-                        else => |t| {
-                            const loc = self.locations.get(unif.lhs) orelse Loc{};
-                            try self.allocDiag(loc, "expected function, got: {}", .{t});
-                            try self.setType(unif.lhs, .errored);
-                            return;
-                        },
-                    };
-
-                    if (t.params.len != n.n) {
-                        try self.allocDiag(
-                            n.loc,
-                            "function expects {} arguments, got {}",
-                            .{ t.params.len, n.n },
-                        );
-                        try self.setType(unif.lhs, .errored);
-                        i -= 1;
-                        _ = self.unifications.swapRemove(i);
-                        return;
-                    }
-                },
-                .parameter => |p| {
-                    const t = switch (self.types.get(p.f) orelse unreachable) {
-                        .unknown => continue,
-                        .function => |f| f,
-                        else => |t| {
-                            const loc = self.locations.get(unif.lhs) orelse Loc{};
-                            try self.allocDiag(loc, "expected function, got: {}", .{t});
-                            try self.setType(unif.lhs, .errored);
-                            return;
-                        },
-                    };
-
-                    if (p.param >= t.params.len) {
-                        const loc = self.locations.get(unif.lhs) orelse Loc{};
-                        try self.allocDiag(loc, "too many arguments to function", .{});
-                        try self.setType(unif.lhs, .errored);
-                        return;
-                    }
-
-                    try self.setType(unif.lhs, t.params[p.param]);
-                    i -= 1;
-                    _ = self.unifications.swapRemove(i);
-                },
-                .ret => |r| {
-                    const t = switch (self.types.get(r) orelse unreachable) {
-                        .unknown => continue,
-                        .function => |f| f,
-                        else => |t| {
-                            const loc = self.locations.get(unif.lhs) orelse Loc{};
-                            try self.allocDiag(loc, "expected function, got: {}", .{t});
-                            try self.setType(unif.lhs, .errored);
-                            return;
-                        },
-                    };
-
-                    try self.setType(unif.lhs, t.ret.*);
-                    i -= 1;
-                    _ = self.unifications.swapRemove(i);
-                },
-                .typ => |t| {
-                    try self.setType(unif.lhs, t);
-                    i -= 1;
-                    _ = self.unifications.swapRemove(i);
-                },
-            }
-        }
-    }
-
-    /// solve tries to find the type of all expressions.
-    pub fn solve(self: *Sema) !void {
-        var w = std.io.getStdOut().writer();
-
-        while (self.made_progress) {
-            if (self.debug) try self.writeState(w);
-
-            self.made_progress = false;
-            try self.solveIter();
-        }
-
-        if (self.debug) try self.writeState(w);
-
-        {
-            var it = self.types.iterator();
-            while (it.next()) |entry| {
-                switch (entry.value_ptr.*) {
-                    .unknown => {
-                        const loc = self.locations.get(entry.key_ptr.*) orelse Loc{};
-                        try self.allocDiag(loc, "could not infer type", .{});
-                    },
-                    else => {},
-                }
-            }
-        }
-
-        if (self.diags.items.len > 0) return error.TypeCheckFailed;
+        try self.prepopulate();
     }
 
     pub fn deinit(self: *Sema) void {
+        self.arena.deinit();
+
         {
-            var it = self.types.iterator();
+            var it = self.decl_types.iterator();
             while (it.next()) |entry| {
                 entry.value_ptr.deinit(self.gpa);
             }
-            self.types.deinit(self.gpa);
+
+            self.decl_types.deinit(self.gpa);
         }
 
-        for (self.var_maps.items) |*vm| {
-            vm.deinit(self.gpa);
-        }
-        self.var_maps.deinit(self.gpa);
-
-        for (self.diags.items) |*d| d.deinit();
-        self.diags.deinit(self.gpa);
-
-        self.unifications.deinit(self.gpa);
-        self.locations.deinit(self.gpa);
+        for (self.constraints.items) |*c| c.deinit(self.gpa);
+        self.constraints.deinit(self.gpa);
     }
 };
 
 const testing = std.testing;
-
-fn expectTypesEqual(source: []const u8, expected: []const struct { id: []const u8, t: Type }) !void {
-    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
-
-    var p = parser.Parser.init(testing.allocator, l);
-    defer p.deinit();
-
-    var program = try p.parse();
-    defer program.deinit();
-
-    try normaliseProgram(&program);
-
-    var sema = Sema.init(testing.allocator, false);
-    defer sema.deinit();
-
-    try sema.prepopulate();
-    try sema.generateRules(&program);
-    try sema.solve();
-
-    for (expected) |item| {
-        const id = sema.currentVarMap().get(item.id) orelse return error.IdNotFound;
-        const t = sema.types.get(.{ .id = id }) orelse return error.IdNotFound;
-        if (!t.eql(item.t)) {
-            std.debug.print("type of {s} incorrect; expected {}, got {}\n", .{ item.id, item.t, t });
-        }
-    }
-}
-
-fn expectTypeCheckFail(source: []const u8, err: anyerror) !void {
-    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
-
-    var p = parser.Parser.init(testing.allocator, l);
-    defer p.deinit();
-
-    var program = try p.parse();
-    defer program.deinit();
-
-    try normaliseProgram(&program);
-
-    var sema = Sema.init(testing.allocator, false);
-    defer sema.deinit();
-
-    try sema.prepopulate();
-
-    var e = sema.generateRules(&program);
-    e catch {
-        try testing.expectError(err, e);
-        return;
-    };
-
-    var e2 = sema.solve();
-    e2 catch {
-        try testing.expectError(err, e2);
-        return;
-    };
-
-    return error.TestExpectError;
-}
-
-fn testNormalised(source: []const u8, expected: []const u8) !void {
-    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
-
-    var p = parser.Parser.init(testing.allocator, l);
-    defer p.deinit();
-
-    var program = try p.parse();
-    defer program.deinit();
-
-    try normaliseProgram(&program);
-
-    var al = std.ArrayList(u8).init(testing.allocator);
-    defer al.deinit();
-    var w = al.writer();
-
-    for (program.stmts.items) |stmt| {
-        try stmt.inner.write(w);
-    }
-
-    try testing.expectEqualStrings(expected, al.items);
-}
-
-test "reorder expressions and assignments" {
-    try testNormalised("1; a = 1;",
-        \\a = 1;
-        \\1;
-        \\
-    );
-}
-
-test "reorder assignments" {
-    try testNormalised("a = b; b = 1;",
-        \\b = 1;
-        \\a = b;
-        \\
-    );
-
-    try testNormalised("a = let b = 10; in b+2; b = 1;",
-        \\a = (let [b=10;] (+ b 2));
-        \\b = 1;
-        \\
-    );
-    try testNormalised("a = fn x y => x + y; x = 10;",
-        \\a = (fn [x y] (+ x y));
-        \\x = 10;
-        \\
-    );
-}
-
-test "reorder allows functions to refer to themselves" {
-    try testNormalised("a = fn x y => a x y;",
-        \\a = (fn [x y] (a x y));
-        \\
-    );
-}
-
-test "assignments" {
-    try expectTypesEqual("a=b;b=1;c=true;", &.{
-        .{ .id = "a", .t = .int },
-        .{ .id = "b", .t = .int },
-        .{ .id = "c", .t = .bool },
-    });
-}
-
-test "fail: assignments" {
-    try expectTypeCheckFail("a=b;", error.CouldNotFindVariable);
-    try expectTypeCheckFail("a=1;a=true;", error.TypeCheckFailed);
-}
-
-test "maths" {
-    try expectTypesEqual("a=1+1;b=2-1;c=1*1;d=2/1;e=-1;", &.{
-        .{ .id = "a", .t = .int },
-        .{ .id = "b", .t = .int },
-        .{ .id = "c", .t = .int },
-        .{ .id = "d", .t = .int },
-        .{ .id = "e", .t = .int },
-    });
-}
-
-test "fail: maths" {
-    try expectTypeCheckFail("a=-true;", error.TypeCheckFailed);
-    try expectTypeCheckFail("a=1+true;", error.TypeCheckFailed);
-}
-
-test "boolean binops" {
-    try expectTypesEqual("a=5==5; b=6*2; c=b>18; d=8-2*2<=3;", &.{
-        .{ .id = "a", .t = .bool },
-        .{ .id = "b", .t = .int },
-        .{ .id = "c", .t = .bool },
-        .{ .id = "d", .t = .bool },
-    });
-}
-
-test "fail: boolean binops" {
-    try expectTypeCheckFail("1 == true;", error.TypeCheckFailed);
-    try expectTypeCheckFail("false == true;", error.TypeCheckFailed);
-}
-
-test "let..in" {
-    try expectTypesEqual("a = let x = 5; in x * 2; b = a + 1;", &.{
-        .{ .id = "a", .t = .int },
-        .{ .id = "b", .t = .int },
-    });
-
-    try expectTypesEqual("a = true; b = let a = false; in let a = 10; in a * 2;", &.{
-        .{ .id = "a", .t = .bool },
-        .{ .id = "b", .t = .int },
-    });
-}
-
-test "fail: let..in" {
-    try expectTypeCheckFail("a=1;b=let a=true; in a+2;", error.TypeCheckFailed);
-}
-
-fn allocParams(params: []const Type) ![]const Type {
-    var p = try testing.allocator.alloc(Type, params.len);
-    std.mem.copy(Type, p, params);
-    return p;
-}
-
-test "functions" {
-    var int: Type = .int;
-
-    var param = try allocParams(&.{.int});
-    defer testing.allocator.free(param);
-    var params = try allocParams(&.{ .int, .int });
-    defer testing.allocator.free(params);
-
-    try expectTypesEqual("f = fn x => -x;g = fn x y => x + y;", &.{
-        .{ .id = "f", .t = .{ .function = .{
-            .params = param,
-            .ret = &int,
-        } } },
-        .{ .id = "g", .t = .{ .function = .{
-            .params = params,
-            .ret = &int,
-        } } },
-    });
-}
-test "function calls" {
-    var int: Type = .int;
-
-    var param = try allocParams(&.{.int});
-    defer testing.allocator.free(param);
-    var params = try allocParams(&.{ .int, .int });
-    defer testing.allocator.free(params);
-
-    try expectTypesEqual("f = fn x => -x;a = f 1;", &.{
-        .{ .id = "f", .t = .{ .function = .{
-            .params = param,
-            .ret = &int,
-        } } },
-        .{ .id = "a", .t = .int },
-    });
-
-    try expectTypesEqual("f = fn x y => x + y;a = f 1 2;", &.{
-        .{ .id = "f", .t = .{ .function = .{
-            .params = params,
-            .ret = &int,
-        } } },
-        .{ .id = "a", .t = .int },
-    });
-}
-
-test "fail: function calls" {
-    try expectTypeCheckFail("f = fn x => -x;a = f true;", error.TypeCheckFailed);
-    try expectTypeCheckFail("f = fn x y => x + y;a = f 1;", error.TypeCheckFailed);
-}
-
-test "if/then/elif/else" {
-    try expectTypesEqual("a = if true then 1 else 2;", &.{.{ .id = "a", .t = .int }});
-    try expectTypesEqual("a = if true then 1 elif false then 2 else 3;", &.{.{ .id = "a", .t = .int }});
-    try expectTypesEqual("a = if true then true else false;", &.{.{ .id = "a", .t = .bool }});
-}
-
-test "fail: if/then/elif/else" {
-    try expectTypeCheckFail("if 1 then 1 else 2;", error.TypeCheckFailed);
-    try expectTypeCheckFail("if true then 1 else false;", error.TypeCheckFailed);
-    try expectTypeCheckFail("a=false;if true then 1 elif false then 2 else a;", error.TypeCheckFailed);
-}
