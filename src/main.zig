@@ -320,21 +320,7 @@ pub fn main() !void {
     var s = sema.Sema.init(gpa.allocator(), opts.args.@"dump-type-checking");
     defer s.deinit();
 
-    try s.prepopulate();
-
-    s.generateRules(&program) catch |e| {
-        if (s.diags.items.len == 0) return e;
-
-        try utils.printErrors(source, s.diags.items);
-        std.os.exit(1);
-    };
-
-    s.solve() catch |e| {
-        if (s.diags.items.len == 0) return e;
-
-        try utils.printErrors(source, s.diags.items);
-        std.os.exit(1);
-    };
+    try s.infer(&program);
 
     var c = compiler.Compiler.init(gpa.allocator(), &program);
     defer c.deinit();

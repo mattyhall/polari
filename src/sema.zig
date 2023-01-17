@@ -22,10 +22,10 @@ const Diag = lexer.Diag;
 /// => args = [10, 20, 30], ret value = f
 fn normaliseApply(
     arena: std.mem.Allocator,
-    lhs: Located(*parser.Expression),
-    rhs: Located(*parser.Expression),
-    args: *std.ArrayList(Located(*parser.Expression)),
-) !Located(*parser.Expression) {
+    lhs: Located(*Expression),
+    rhs: Located(*Expression),
+    args: *std.ArrayList(Located(*Expression)),
+) !Located(*Expression) {
     var f = b: {
         switch (lhs.inner.*) {
             .binop => |binop| {
@@ -48,12 +48,12 @@ fn normaliseApply(
 }
 
 /// normaliseExpression collapses apply binop chains into a single apply expression.
-fn normaliseExpression(arena: std.mem.Allocator, expr: *parser.Expression) error{OutOfMemory}!void {
+fn normaliseExpression(arena: std.mem.Allocator, expr: *Expression) error{OutOfMemory}!void {
     switch (expr.*) {
         .binop => |binop| {
             switch (binop.op) {
                 .apply => {
-                    var al = std.ArrayList(Located(*parser.Expression)).init(arena);
+                    var al = std.ArrayList(Located(*Expression)).init(arena);
                     errdefer al.deinit();
 
                     var f = try normaliseApply(arena, binop.lhs, binop.rhs, &al);
