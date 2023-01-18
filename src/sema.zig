@@ -259,6 +259,41 @@ pub fn normaliseProgram(program: *parser.Program) !void {
     try reorder(program);
 }
 
+var PlusExpr = Expression{ .identifier = "+" };
+var MinusExpr = Expression{ .identifier = "-" };
+var MultiplyExpr = Expression{ .identifier = "*" };
+var DivideExpr = Expression{ .identifier = "/" };
+var EqExpr = Expression{ .identifier = "==" };
+var NeqExpr = Expression{ .identifier = "!=" };
+var LtExpr = Expression{ .identifier = "<" };
+var LteExpr = Expression{ .identifier = "<=" };
+var GtExpr = Expression{ .identifier = ">" };
+var GteExpr = Expression{ .identifier = ">=" };
+var NegateExpr = Expression{ .identifier = "negate" };
+
+fn unaryopToExpr(op: parser.UnaryOperation) Located(*Expression) {
+    return Located(*Expression){ .loc = .{}, .inner = switch (op) {
+        .negate => &NegateExpr,
+        .grouping => unreachable,
+    } };
+}
+
+fn binopToExpr(op: parser.BinaryOperation) Located(*Expression) {
+    return Located(*Expression){ .loc = .{}, .inner = switch (op) {
+        .plus => &PlusExpr,
+        .minus => &MinusExpr,
+        .multiply => &MultiplyExpr,
+        .divide => &DivideExpr,
+        .eq => &EqExpr,
+        .neq => &NeqExpr,
+        .lt => &LtExpr,
+        .lte => &LteExpr,
+        .gt => &GtExpr,
+        .gte => &GteExpr,
+        .apply => unreachable,
+    } };
+}
+
 /// BuiltinType represents a common, builtin type of a language - e.g. numbers, booleans etc.
 const BuiltinType = enum {
     int,
@@ -336,6 +371,25 @@ const TypeVar = union(enum) {
         };
     }
 
+    pub fn format(self: *const TypeVar, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = opts;
+        _ = fmt;
+        switch (self.*) {
+            .builtin => |b| try writer.print("{}", .{b}),
+            .variable => |v| try writer.print("t{}", .{v}),
+            .construct => |c| {
+                try writer.print("({s} ", .{c.constructor});
+
+                for (c.args) |arg, i| {
+                    try writer.print("{}", .{arg});
+                    if (i < c.args.len - 1) try writer.writeAll(" ");
+                }
+
+                try writer.writeAll(")");
+            },
+        }
+    }
+
     fn deinit(self: *TypeVar, gpa: std.mem.Allocator) void {
         switch (self.*) {
             .construct => |c| {
@@ -402,6 +456,9 @@ pub const Sema = struct {
     /// decl_types stores the types of all decls in the program. It is allocated using `gpa`.
     decl_types: std.StringHashMapUnmanaged(Type),
 
+    /// var_type_vars stores the variable for every named thing (i.e. a variable) in the current decl.
+    var_type_vars: std.StringHashMapUnmanaged(Variable),
+
     /// expr_type_vars stores the variable for every expression in the current decl.
     expr_type_vars: std.AutoHashMapUnmanaged(*const Expression, Variable),
 
@@ -425,6 +482,7 @@ pub const Sema = struct {
             .arena = std.heap.ArenaAllocator.init(gpa),
             .decl_types = .{},
             .expr_type_vars = .{},
+            .var_type_vars = .{},
             .constraints = .{},
             .substitutions = .{},
             .next_var = 0,
@@ -440,11 +498,17 @@ pub const Sema = struct {
         var writer = std.io.getStdErr().writer();
 
         {
+            var it = self.var_type_vars.iterator();
+            while (it.next()) |entry|
+                std.debug.print("{s} : t{}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+        }
+
+        {
             var it = self.expr_type_vars.iterator();
             while (it.next()) |entry| {
                 try Expression.write(entry.key_ptr.*, writer);
                 // try entry.key_ptr.write(writer);
-                std.debug.print(": {}\n", .{entry.value_ptr.*});
+                std.debug.print(" : t{}\n", .{entry.value_ptr.*});
             }
         }
     }
@@ -459,11 +523,10 @@ pub const Sema = struct {
 
     /// preopulate inserts builtin decls (e.g. the maths operations) into decl_types.
     fn prepopulate(self: *Sema) !void {
-        try self.decl_types.ensureUnusedCapacity(self.gpa, 4);
+        try self.decl_types.ensureUnusedCapacity(self.gpa, 4 + 6 + 1);
 
         for (&[_][]const u8{ "+", "-", "*", "/" }) |op| {
             var args = try self.gpa.alloc(Type, 3);
-            errdefer self.gpa.free(args);
             args[0] = .{ .builtin = .int };
             args[1] = .{ .builtin = .int };
             args[2] = .{ .builtin = .int };
@@ -471,13 +534,259 @@ pub const Sema = struct {
             const math_binop_ty = Type{ .construct = .{ .constructor = "->", .args = args } };
             self.decl_types.putAssumeCapacity(op, math_binop_ty);
         }
+
+        for (&[_][]const u8{ "==", "!=", ">", ">=", "<", "<=" }) |op| {
+            var args = try self.gpa.alloc(Type, 3);
+            args[0] = .{ .builtin = .boolean };
+            args[1] = .{ .builtin = .boolean };
+            args[2] = .{ .builtin = .boolean };
+
+            const bool_binop_ty = Type{ .construct = .{ .constructor = "->", .args = args } };
+            self.decl_types.putAssumeCapacity(op, bool_binop_ty);
+        }
+
+        {
+            var args = try self.gpa.alloc(Type, 2);
+            args[0] = .{ .builtin = .int };
+            args[1] = .{ .builtin = .int };
+
+            const negate_unaryop_ty = Type{ .construct = .{ .constructor = "->", .args = args } };
+            self.decl_types.putAssumeCapacity("negate", negate_unaryop_ty);
+        }
+    }
+
+    /// typevar returns a fresh type variable.
+    fn typevar(self: *Sema) Variable {
+        const v = self.next_var;
+        self.next_var += 1;
+        return v;
+    }
+
+    /// typeToTypeVar converts a Type to its corresponding TypeVar. In the case that a generic is hit then a fresh
+    /// typevar is generated for it.
+    fn typeToTypeVar(self: *Sema, t: Type) !TypeVar {
+        var arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer arena.deinit();
+
+        var generics = std.AutoHashMap(Variable, TypeVar).init(arena.allocator());
+        return self.typeToTypeVarInner(t, &generics);
+    }
+
+    /// typeToTypeVar converts a Type to its corresponding TypeVar. In the case that a generic if a typevar has already
+    /// been assigned for it (i.e. it is already in `generics`) then it is returned, otherwise a fresh typevar is
+    /// assigned.
+    fn typeToTypeVarInner(self: *Sema, t: Type, generics: *std.AutoHashMap(Variable, TypeVar)) !TypeVar {
+        return switch (t) {
+            .builtin => |b| TypeVar{ .builtin = b },
+            .construct => |c| b: {
+                var args = try self.gpa.alloc(TypeVar, c.args.len);
+                errdefer self.gpa.free(args);
+
+                for (c.args) |arg, i| {
+                    args[i] = try self.typeToTypeVarInner(arg, generics);
+                }
+
+                break :b TypeVar{ .construct = .{ .constructor = c.constructor, .args = args } };
+            },
+            .generic => |g| b: {
+                const gop = try generics.getOrPut(g);
+                if (!gop.found_existing) gop.value_ptr.* = .{ .variable = self.typevar() };
+                break :b gop.value_ptr.*;
+            },
+        };
+    }
+
+    /// generateApplyConstraints generates constraints for applying `f` to `f_args`. We generate two constraints. The
+    /// first is that this expression has the same type as the return value of the function. The second is the function
+    /// takes the same types as parameters as the args it is being given.
+    fn generateApplyConstraints(
+        self: *Sema,
+        tv: Variable,
+        f: Located(*Expression),
+        f_args: []Located(*Expression),
+    ) error{OutOfMemory}!Variable {
+        const f_tv = try self.generateExprConstraints(f.inner);
+
+        var args = try std.ArrayListUnmanaged(TypeVar).initCapacity(self.gpa, f_args.len + 1);
+        errdefer args.deinit(self.gpa);
+
+        for (f_args) |arg| {
+            const a_tv = try self.generateExprConstraints(arg.inner);
+            args.appendAssumeCapacity(.{ .variable = a_tv });
+        }
+
+        const ret_tv = self.typevar();
+        args.appendAssumeCapacity(.{ .variable = ret_tv });
+
+        try self.constraints.append(self.gpa, .{
+            .lhs = .{ .variable = tv },
+            .rhs = .{ .variable = ret_tv },
+            .provenance = f.inner,
+        });
+
+        try self.constraints.append(self.gpa, .{
+            .lhs = .{ .variable = f_tv },
+            .rhs = TypeVar{ .construct = .{ .constructor = "->", .args = try args.toOwnedSlice(self.gpa) } },
+            .provenance = f.inner,
+        });
+
+        return tv;
+    }
+
+    /// generateExprConstraints generates constraints for the given expression and returns the type variable of the
+    /// expression.
+    fn generateExprConstraints(self: *Sema, expr: *const Expression) !Variable {
+        const tv = self.typevar();
+        try self.expr_type_vars.put(self.arena.allocator(), expr, tv);
+
+        switch (expr.*) {
+            // For builtin types we add a constraint that tv is that type.
+            .integer, .boolean => try self.constraints.append(self.gpa, .{
+                .lhs = .{ .variable = tv },
+                .rhs = TypeVar{ .builtin = switch (expr.*) {
+                    .integer => BuiltinType.int,
+                    .boolean => BuiltinType.boolean,
+                    else => unreachable,
+                } },
+                .provenance = expr,
+            }),
+
+            // For identifiers we add a constraint that the type of the expression is the type given to that
+            // identifier. The identifier may be polymorphic (i.e. generic), in which case we give each generic
+            // parameter a new typevar.
+            .identifier => |ident| {
+                if (self.decl_types.get(ident)) |t| {
+                    const rhs = try self.typeToTypeVar(t);
+                    try self.constraints.append(self.gpa, .{
+                        .lhs = .{ .variable = tv },
+                        .rhs = rhs,
+                        .provenance = expr,
+                    });
+                    return tv;
+                }
+
+                // FIXME: Should we ever need to put here - presumably the variable exists?
+                const gop = try self.var_type_vars.getOrPut(self.arena.allocator(), ident);
+                if (!gop.found_existing) gop.value_ptr.* = self.typevar();
+
+                try self.constraints.append(self.gpa, .{
+                    .lhs = .{ .variable = tv },
+                    .rhs = .{ .variable = gop.value_ptr.* },
+                    .provenance = expr,
+                });
+            },
+
+            // For an `if` we generate a constraint saying the condition must be a boolean and another constraint
+            // saying the `then` and the `else` types must be the same.
+            .@"if" => |i| {
+                const c_tv = try self.generateExprConstraints(i.condition.inner);
+                const t_tv = try self.generateExprConstraints(i.then.inner);
+                const e_tv = try self.generateExprConstraints(i.@"else".inner);
+
+                try self.constraints.append(self.gpa, .{
+                    .lhs = .{ .variable = c_tv },
+                    .rhs = TypeVar{ .builtin = .boolean },
+                    .provenance = i.condition.inner,
+                });
+
+                try self.constraints.append(self.gpa, .{
+                    .lhs = .{ .variable = t_tv },
+                    .rhs = .{ .variable = e_tv },
+                    .provenance = expr,
+                });
+            },
+
+            // For functions we generate a constraint that specifies that it must unify with an instance of the function
+            // ("->") type and then generate a new type variable for every parameter and the return value.
+            .function => |f| {
+                var params = try std.ArrayListUnmanaged(TypeVar).initCapacity(self.gpa, f.params.len + 1);
+                errdefer params.deinit(self.gpa);
+
+                try self.var_type_vars.ensureUnusedCapacity(self.arena.allocator(), @intCast(u32, f.params.len));
+
+                for (f.params) |param| {
+                    const p_tv = self.typevar();
+                    params.appendAssumeCapacity(.{ .variable = p_tv });
+                    self.var_type_vars.putAssumeCapacity(param.inner.identifier, p_tv);
+                }
+
+                const b_tv = try self.generateExprConstraints(f.body.inner);
+                params.appendAssumeCapacity(.{ .variable = b_tv });
+
+                try self.constraints.append(self.gpa, .{
+                    .lhs = .{ .variable = tv },
+                    .rhs = TypeVar{ .construct = .{ .constructor = "->", .args = try params.toOwnedSlice(self.gpa) } },
+                    .provenance = expr,
+                });
+            },
+
+            // For apply we generate two constraints. The first is that this expression has the same type as the return
+            // value of the function. The second is the function takes the same types as parameters as the args it is
+            // being given.
+            .apply => |a| return try self.generateApplyConstraints(tv, a.f, a.args),
+
+            // Binops are handled as applications.
+            .binop => |binop| return try self.generateApplyConstraints(
+                tv,
+                binopToExpr(binop.op),
+                &[_]Located(*Expression){ binop.lhs, binop.rhs },
+            ),
+
+            // Binops are handled as applications.
+            .unaryop => |unaryop| switch (unaryop.op) {
+                .grouping => {
+                    const g_tv = try self.generateExprConstraints(unaryop.e.inner);
+                    try self.constraints.append(self.gpa, .{
+                        .lhs = .{ .variable = tv },
+                        .rhs = .{ .variable = g_tv },
+                        .provenance = expr,
+                    });
+                },
+                else => return try self.generateApplyConstraints(
+                    tv,
+                    unaryopToExpr(unaryop.op),
+                    &[_]Located(*Expression){unaryop.e},
+                ),
+            },
+
+            .let => @panic("not implemented"),
+        }
+
+        return tv;
     }
 
     /// infer infers the type of all expressions in `program` and type checks them.
     pub fn infer(self: *Sema, program: *const parser.Program) !void {
-        _ = program;
-
         try self.prepopulate();
+
+        for (program.stmts.items) |stmt| {
+            const res = switch (stmt.inner) {
+                .assignment => |a| b: {
+                    const tv = self.typevar();
+                    try self.var_type_vars.put(self.arena.allocator(), a.identifier, tv);
+
+                    const e_tv = try self.generateExprConstraints(a.expression.inner);
+                    try self.constraints.append(self.gpa, .{
+                        .lhs = .{ .variable = tv },
+                        .rhs = .{ .variable = e_tv },
+                        .provenance = a.expression.inner,
+                    });
+
+                    break :b tv;
+                },
+                .expression => |e| try self.generateExprConstraints(e),
+            };
+            _ = res;
+
+            if (self.debug) {
+                try self.printVars();
+                try self.printConstraints();
+            }
+
+            _ = self.arena.reset(.retain_capacity);
+            self.expr_type_vars = .{};
+            self.var_type_vars = .{};
+        }
     }
 
     pub fn deinit(self: *Sema) void {
