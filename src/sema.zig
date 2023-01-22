@@ -305,7 +305,7 @@ const BuiltinType = enum {
 
         return switch (self.*) {
             .int => writer.writeAll("Int"),
-            .boolean => writer.writeAll("Boolean"),
+            .boolean => writer.writeAll("Bool"),
         };
     }
 };
@@ -1013,13 +1013,15 @@ pub const Sema = struct {
                 else => {},
             }
 
-            std.debug.print("{}\n", .{ty});
+            if (self.debug) std.debug.print("{}\n", .{ty});
 
             _ = self.arena.reset(.retain_capacity);
             self.expr_type_vars = .{};
             self.var_type_vars = .{};
             self.substitutions = .{};
         }
+
+        if (self.constraints.items.len != 0) return error.TypeError;
     }
 
     pub fn deinit(self: *Sema) void {
@@ -1063,6 +1065,50 @@ fn testNormalised(source: []const u8, expected: []const u8) !void {
     try testing.expectEqualStrings(expected, al.items);
 }
 
+const TypeMapping = struct { name: []const u8, type: []const u8 };
+
+fn testTypeCheck(source: []const u8, mappings: []const TypeMapping) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
+
+    var p = parser.Parser.init(testing.allocator, l);
+    defer p.deinit();
+
+    var program = try p.parse();
+    defer program.deinit();
+
+    try normaliseProgram(&program);
+
+    var sema = Sema.init(testing.allocator, false);
+    defer sema.deinit();
+
+    try sema.infer(&program);
+
+    for (mappings) |m| {
+        const t = sema.decl_types.get(m.name) orelse return error.DeclNotFound;
+        const t_s = try std.fmt.allocPrint(testing.allocator, "{}", .{t});
+        defer testing.allocator.free(t_s);
+
+        try testing.expectEqualStrings(m.type, t_s);
+    }
+}
+
+fn testErrorTypeCheck(source: []const u8) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
+
+    var p = parser.Parser.init(testing.allocator, l);
+    defer p.deinit();
+
+    var program = try p.parse();
+    defer program.deinit();
+
+    try normaliseProgram(&program);
+
+    var sema = Sema.init(testing.allocator, false);
+    defer sema.deinit();
+
+    try testing.expectError(error.TypeError, sema.infer(&program));
+}
+
 test "reorder expressions and assignments" {
     try testNormalised("1; a = 1;",
         \\a = 1;
@@ -1096,3 +1142,99 @@ test "reorder allows functions to refer to themselves" {
         \\
     );
 }
+
+test "assignments" {
+    try testTypeCheck("a = b; b = 1; c = true;", &.{
+        TypeMapping{ .name = "a", .type = "Int" },
+        TypeMapping{ .name = "b", .type = "Int" },
+        TypeMapping{ .name = "c", .type = "Bool" },
+    });
+}
+
+// test "fail: assignments" {
+//     try testErrorTypeCheck("a=b;");
+//     try testErrorTypeCheck("a=true;");
+// }
+
+test "maths" {
+    try testTypeCheck("a=1+1;b=2-1;c=1*1;d=2/1;e=-1;", &.{
+        TypeMapping{ .name = "a", .type = "Int" },
+        TypeMapping{ .name = "b", .type = "Int" },
+        TypeMapping{ .name = "c", .type = "Int" },
+        TypeMapping{ .name = "d", .type = "Int" },
+        TypeMapping{ .name = "e", .type = "Int" },
+    });
+}
+
+// test "fail: maths" {
+//     try testErrorTypeCheck("a=-true;");
+//     try testErrorTypeCheck("a=1+true;");
+// }
+
+// test "boolean binops" {
+//     try testTypeCheck("a=5==5; b=6*2; c=b>18; d=8-2*2<=3;", &.{
+//         TypeMapping{ .name = "a", .type = "Bool" },
+//         TypeMapping{ .name = "b", .type = "Bool" },
+//         TypeMapping{ .name = "c", .type = "Bool" },
+//         TypeMapping{ .name = "d", .type = "Bool" },
+//     });
+// }
+
+// test "let..in" {
+//     try testTypeCheck("a = let x = 5; in x * 2; b = a + 1;", &.{
+//         .{ .name = "a", .type = "Int" },
+//         .{ .name = "b", .type = "Int" },
+//     });
+
+//     try testTypeCheck("a = true; b = let a = false; in let a = 10; in a * 2;", &.{
+//         .{ .name = "a", .type = "Bool" },
+//         .{ .name = "b", .type = "Int" },
+//     });
+// }
+
+// test "fail: let..in" {
+//     try testErrorTypeCheck("a=1;b=let a=true; in a+2;");
+// }
+
+test "functions" {
+    try testTypeCheck("f = fn x => -x; g = fn x y => x + y;", &.{
+        TypeMapping{ .name = "f", .type = "(-> Int Int)" },
+        TypeMapping{ .name = "g", .type = "(-> Int Int Int)" },
+    });
+}
+
+test "function calls" {
+    try testTypeCheck("f = fn x => -x;a = f 1;", &.{
+        TypeMapping{ .name = "f", .type = "(-> Int Int)" },
+        TypeMapping{ .name = "a", .type = "Int" },
+    });
+
+    try testTypeCheck("f = fn x y => x + y;a = f 1 2;", &.{
+        TypeMapping{ .name = "f", .type = "(-> Int Int Int)" },
+        TypeMapping{ .name = "a", .type = "Int" },
+    });
+}
+
+// test "fail: function calls" {
+//     try testErrorTypeCheck("f = fn x => -x; a = f true;");
+// }
+
+// test "if/then/elif/else" {
+//     try testTypeCheck("a = if true then 1 else 2;", &.{
+//         .{ .name = "a", .type = "Int" },
+//     });
+
+//     try testTypeCheck("a = if true then 1 elif false then 2 else 3;", &.{
+//         .{ .name = "a", .type = "Int" },
+//     });
+
+//     try testTypeCheck("a = if true then true else false;", &.{
+//         .{ .name = "a", .type = "Bool" },
+//     });
+// }
+
+// test "fail: if/then/elif/else" {
+//     try testErrorTypeCheck("if 1 then 1 else 2;");
+//     try testErrorTypeCheck("if true then 1 else false;");
+//     try testErrorTypeCheck("a=false;if true then 1 elif false then 2 else a;");
+// }
