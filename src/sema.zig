@@ -1280,3 +1280,17 @@ test "fail: if/then/elif/else" {
     try testErrorTypeCheck("if true then 1 else false;");
     try testErrorTypeCheck("a=false;if true then 1 elif false then 2 else a;");
 }
+
+test "polymorphic functions" {
+    try testTypeCheck(
+        "id = fn x => x; const = fn a b => a; m = id 147; n = id true; o = const 1 2; p = const 1 true;",
+        &.{
+            .{ .name = "id", .type = "(-> g0 g0)" },
+            .{ .name = "const", .type = "(-> g0 g1 g0)" },
+            .{ .name = "m", .type = "Int" },
+            .{ .name = "n", .type = "Bool" },
+            .{ .name = "o", .type = "Int" },
+            .{ .name = "p", .type = "Int" },
+        },
+    );
+}
