@@ -733,8 +733,9 @@ pub const Sema = struct {
                 });
             },
 
-            // For an `if` we generate a constraint saying the condition must be a boolean and another constraint
-            // saying the `then` and the `else` types must be the same.
+            // For an `if` we generate a constraint saying the condition must be a boolean; another constraint saying
+            // the `then` and the `else` types must be the same and finally a constraint saying that tv must be the
+            // type of the `then` branch.
             .@"if" => |i| {
                 const c_tv = try self.generateExprConstraints(i.condition.inner);
                 const t_tv = try self.generateExprConstraints(i.then.inner);
@@ -749,6 +750,12 @@ pub const Sema = struct {
                 try self.constraints.append(self.gpa, .{
                     .lhs = .{ .variable = t_tv },
                     .rhs = .{ .variable = e_tv },
+                    .provenance = expr,
+                });
+
+                try self.constraints.append(self.gpa, .{
+                    .lhs = .{ .variable = tv },
+                    .rhs = .{ .variable = t_tv },
                     .provenance = expr,
                 });
             },
@@ -1239,22 +1246,22 @@ test "fail: function calls" {
     try testErrorTypeCheck("f = fn x => -x; a = f true;");
 }
 
-// test "if/then/elif/else" {
-//     try testTypeCheck("a = if true then 1 else 2;", &.{
-//         .{ .name = "a", .type = "Int" },
-//     });
+test "if/then/elif/else" {
+    try testTypeCheck("a = if true then 1 else 2;", &.{
+        .{ .name = "a", .type = "Int" },
+    });
 
-//     try testTypeCheck("a = if true then 1 elif false then 2 else 3;", &.{
-//         .{ .name = "a", .type = "Int" },
-//     });
+    try testTypeCheck("a = if true then 1 elif false then 2 else 3;", &.{
+        .{ .name = "a", .type = "Int" },
+    });
 
-//     try testTypeCheck("a = if true then true else false;", &.{
-//         .{ .name = "a", .type = "Bool" },
-//     });
-// }
+    try testTypeCheck("a = if true then true else false;", &.{
+        .{ .name = "a", .type = "Bool" },
+    });
+}
 
-// test "fail: if/then/elif/else" {
-//     try testErrorTypeCheck("if 1 then 1 else 2;");
-//     try testErrorTypeCheck("if true then 1 else false;");
-//     try testErrorTypeCheck("a=false;if true then 1 elif false then 2 else a;");
-// }
+test "fail: if/then/elif/else" {
+    try testErrorTypeCheck("if 1 then 1 else 2;");
+    try testErrorTypeCheck("if true then 1 else false;");
+    try testErrorTypeCheck("a=false;if true then 1 elif false then 2 else a;");
+}
