@@ -578,7 +578,7 @@ pub const Sema = struct {
         }
     }
 
-    /// preopulate inserts builtin decls (e.g. the maths operations) into decl_types.
+    /// prepopulate inserts builtin decls (e.g. the maths operations) into decl_types.
     fn prepopulate(self: *Sema) !void {
         try self.decl_types.ensureUnusedCapacity(self.gpa, 4 + 6 + 1);
 
@@ -594,8 +594,8 @@ pub const Sema = struct {
 
         for (&[_][]const u8{ "==", "!=", ">", ">=", "<", "<=" }) |op| {
             var args = try self.gpa.alloc(Type, 3);
-            args[0] = .{ .builtin = .boolean };
-            args[1] = .{ .builtin = .boolean };
+            args[0] = .{ .builtin = .int };
+            args[1] = .{ .builtin = .int };
             args[2] = .{ .builtin = .boolean };
 
             const bool_binop_ty = Type{ .construct = .{ .constructor = "->", .args = args } };
@@ -1198,14 +1198,14 @@ test "fail: maths" {
     try testErrorTypeCheck("a=1+true;");
 }
 
-// test "boolean binops" {
-//     try testTypeCheck("a=5==5; b=6*2; c=b>18; d=8-2*2<=3;", &.{
-//         TypeMapping{ .name = "a", .type = "Bool" },
-//         TypeMapping{ .name = "b", .type = "Bool" },
-//         TypeMapping{ .name = "c", .type = "Bool" },
-//         TypeMapping{ .name = "d", .type = "Bool" },
-//     });
-// }
+test "boolean binops" {
+    try testTypeCheck("a=5==5; b=6*2; c=b>18; d=8-2*2<=3;", &.{
+        TypeMapping{ .name = "a", .type = "Bool" },
+        TypeMapping{ .name = "b", .type = "Int" },
+        TypeMapping{ .name = "c", .type = "Bool" },
+        TypeMapping{ .name = "d", .type = "Bool" },
+    });
+}
 
 // test "let..in" {
 //     try testTypeCheck("a = let x = 5; in x * 2; b = a + 1;", &.{
