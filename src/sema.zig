@@ -327,6 +327,25 @@ const Type = union(enum) {
     /// bools, `Maybe Int`s etc.
     generic: Variable,
 
+    pub fn format(self: *const Type, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = opts;
+        _ = fmt;
+        switch (self.*) {
+            .builtin => |b| try writer.print("{}", .{b}),
+            .generic => |v| try writer.print("g{}", .{v}),
+            .construct => |c| {
+                try writer.print("({s} ", .{c.constructor});
+
+                for (c.args) |arg, i| {
+                    try writer.print("{}", .{arg});
+                    if (i < c.args.len - 1) try writer.writeAll(" ");
+                }
+
+                try writer.writeAll(")");
+            },
+        }
+    }
+
     fn deinit(self: *Type, gpa: std.mem.Allocator) void {
         switch (self.*) {
             .construct => |c| {
@@ -911,6 +930,47 @@ pub const Sema = struct {
         }
     }
 
+    /// typevarToType converts tv to a Type - substituting variables that are not bound in `substitutions` to generics.
+    fn typevarToType(self: *Sema, tv: TypeVar, generics: *std.AutoHashMap(Variable, Variable)) error{OutOfMemory}!Type {
+        return switch (tv) {
+            .builtin => |b| Type{ .builtin = b },
+            .variable => |v| b: {
+                var t = try self.findAndGenerateTypeInner(v, generics) orelse {
+                    const gop = try generics.getOrPut(v);
+                    if (!gop.found_existing) gop.value_ptr.* = generics.unmanaged.size - 1;
+                    break :b Type{ .generic = gop.value_ptr.* };
+                };
+                break :b t;
+            },
+            .construct => |c| b: {
+                var args = try self.gpa.alloc(Type, c.args.len);
+                errdefer self.gpa.free(args);
+
+                for (c.args) |arg, i| {
+                    args[i] = try self.typevarToType(arg, generics);
+                }
+
+                break :b Type{ .construct = .{ .constructor = c.constructor, .args = args } };
+            },
+        };
+    }
+
+    /// findAndGenerateTypeInner finds v in the substitutions and returns its type.
+    fn findAndGenerateTypeInner(self: *Sema, v: Variable, generics: *std.AutoHashMap(Variable, Variable)) !?Type {
+        for (self.substitutions.items) |sub| {
+            if (sub.lhs != .variable or sub.lhs.variable != v) continue;
+            return try self.typevarToType(sub.rhs, generics);
+        }
+
+        return null;
+    }
+
+    /// findAndGenerateType finds v in the substitutions and returns its type.
+    fn findAndGenerateType(self: *Sema, v: Variable) !Type {
+        var generics = std.AutoHashMap(Variable, Variable).init(self.arena.allocator());
+        return (try self.findAndGenerateTypeInner(v, &generics)) orelse unreachable;
+    }
+
     /// infer infers the type of all expressions in `program` and type checks them.
     pub fn infer(self: *Sema, program: *const parser.Program) !void {
         try self.prepopulate();
@@ -932,7 +992,6 @@ pub const Sema = struct {
                 },
                 .expression => |e| try self.generateExprConstraints(e),
             };
-            _ = res;
 
             if (self.debug) {
                 try self.printVars();
@@ -940,6 +999,21 @@ pub const Sema = struct {
             }
 
             try self.solve();
+
+            if (self.debug) try self.printConstraints();
+
+            if (self.debug) {
+                std.debug.print("============== RESULT ==============\n", .{});
+                std.debug.print("Looking for {}\n", .{res});
+            }
+
+            var ty = try self.findAndGenerateType(res);
+            switch (stmt.inner) {
+                .assignment => |a| try self.decl_types.put(self.gpa, a.identifier, ty),
+                else => {},
+            }
+
+            std.debug.print("{}\n", .{ty});
 
             _ = self.arena.reset(.retain_capacity);
             self.expr_type_vars = .{};
