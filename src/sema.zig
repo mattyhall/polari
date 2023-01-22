@@ -370,6 +370,26 @@ const TypeVar = union(enum) {
     /// variable is for an unknown type.
     variable: Variable,
 
+    /// unifiableWith returns true if self can be unified with other.
+    fn unifiableWith(self: TypeVar, other: TypeVar) bool {
+        if (self == .variable or other == .variable) return true;
+        if (self == .builtin and other == .builtin and self.builtin == other.builtin) return true;
+
+        if (self != .construct or other != .construct) return false;
+
+        var lhs = self.construct;
+        var rhs = other.construct;
+
+        if (!std.mem.eql(u8, lhs.constructor, rhs.constructor)) return false;
+        if (lhs.args.len != rhs.args.len) return false;
+
+        for (lhs.args) |lhs_arg, i| {
+            if (!lhs_arg.unifiableWith(rhs.args[i])) return false;
+        }
+
+        return true;
+    }
+
     fn clone(self: TypeVar, gpa: std.mem.Allocator) !TypeVar {
         switch (self) {
             .builtin, .variable => return self,
@@ -854,6 +874,8 @@ pub const Sema = struct {
             var to_add = std.ArrayListUnmanaged(Constraint){};
 
             for (self.constraints.items) |constraint| {
+                if (!constraint.lhs.unifiableWith(constraint.rhs)) continue;
+
                 // If one side is a variable then we can just use the other side whenever we see it.
                 if (constraint.lhs == .variable) {
                     if (self.debug) self.printSub(constraint, constraint.lhs, constraint.rhs);
@@ -879,15 +901,13 @@ pub const Sema = struct {
                     continue;
                 }
 
-                // If both sides are constructors then we can generate new constraints for the arguments, but only if
-                // the constructors are the same.
-                if (constraint.lhs != .construct or constraint.rhs != .construct) continue;
+                if (constraint.lhs == .builtin) continue;
 
+                // If unifiableWith has passed then we know at this point both sides are constructs with unifiable
+                // arguments
+                std.debug.assert(constraint.lhs == .construct and constraint.rhs == .construct);
                 var lhs = constraint.lhs.construct;
                 var rhs = constraint.rhs.construct;
-
-                if (!std.mem.eql(u8, lhs.constructor, rhs.constructor)) continue;
-                if (lhs.args.len != rhs.args.len) continue;
 
                 if (self.debug) std.debug.print("{}: Expanding\n", .{constraint});
 
@@ -1153,7 +1173,7 @@ test "assignments" {
 
 // test "fail: assignments" {
 //     try testErrorTypeCheck("a=b;");
-//     try testErrorTypeCheck("a=true;");
+//     try testErrorTypeCheck("a=true;a=1;");
 // }
 
 test "maths" {
@@ -1166,10 +1186,10 @@ test "maths" {
     });
 }
 
-// test "fail: maths" {
-//     try testErrorTypeCheck("a=-true;");
-//     try testErrorTypeCheck("a=1+true;");
-// }
+test "fail: maths" {
+    try testErrorTypeCheck("a=-true;");
+    try testErrorTypeCheck("a=1+true;");
+}
 
 // test "boolean binops" {
 //     try testTypeCheck("a=5==5; b=6*2; c=b>18; d=8-2*2<=3;", &.{
@@ -1215,9 +1235,9 @@ test "function calls" {
     });
 }
 
-// test "fail: function calls" {
-//     try testErrorTypeCheck("f = fn x => -x; a = f true;");
-// }
+test "fail: function calls" {
+    try testErrorTypeCheck("f = fn x => -x; a = f true;");
+}
 
 // test "if/then/elif/else" {
 //     try testTypeCheck("a = if true then 1 else 2;", &.{
