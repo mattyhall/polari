@@ -351,6 +351,24 @@ const TypeVar = union(enum) {
     /// variable is for an unknown type.
     variable: Variable,
 
+    fn clone(self: TypeVar, gpa: std.mem.Allocator) !TypeVar {
+        switch (self) {
+            .builtin, .variable => return self,
+            else => {},
+        }
+
+        var c = self.construct;
+
+        var args = try gpa.alloc(TypeVar, c.args.len);
+        errdefer gpa.free(args);
+
+        for (c.args) |a, i| {
+            args[i] = try a.clone(gpa);
+        }
+
+        return .{ .construct = .{ .constructor = c.constructor, .args = args } };
+    }
+
     fn eql(lhs: TypeVar, rhs: TypeVar) bool {
         if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
 
@@ -755,6 +773,144 @@ pub const Sema = struct {
         return tv;
     }
 
+    /// printSubs prints the list of substitutions out.
+    fn printSubs(self: *const Sema) void {
+        std.debug.print("[", .{});
+        for (self.substitutions.items) |sub, i| {
+            std.debug.print("{}", .{sub});
+            if (i < self.substitutions.items.len - 1) std.debug.print(", ", .{});
+        }
+        std.debug.print("]", .{});
+    }
+
+    /// printSub prints a debug message indicating we are substituting `to_be_replaced` with `with`.
+    fn printSub(self: *const Sema, constraint: Constraint, to_be_replaced: TypeVar, with: TypeVar) void {
+        std.debug.print("{}: Adding {}:={} to ", .{ constraint, to_be_replaced, with });
+        self.printSubs();
+        std.debug.print("\n", .{});
+    }
+
+    /// replaceTypeVar will replace `tv` with `with` if `tv` is the variable `to_be_replaced`. Otherwise it will
+    /// recurse into `tv`'s children and replace them if needed.
+    fn replaceTypeVar(self: *Sema, tv: *TypeVar, to_be_replaced: Variable, with: TypeVar) !bool {
+        switch (tv.*) {
+            .variable => |v| if (v == to_be_replaced) {
+                tv.* = try with.clone(self.gpa);
+                return true;
+            } else {},
+            .builtin => {},
+            .construct => |c| {
+                var ret = false;
+                for (c.args) |*arg| {
+                    ret = ret or try self.replaceTypeVar(arg, to_be_replaced, with);
+                }
+                return ret;
+            },
+        }
+
+        return false;
+    }
+
+    /// replace replaced any occurrences of the variable `to_be_replaced` with `with`.
+    fn replace(self: *Sema, to_be_replaced: Variable, with: TypeVar) !void {
+        for (self.constraints.items) |*constraint| {
+            var orig = constraint.*;
+
+            if ((try self.replaceTypeVar(&constraint.lhs, to_be_replaced, with) or
+                try self.replaceTypeVar(&constraint.rhs, to_be_replaced, with)) and self.debug)
+            {
+                if (self.debug) std.debug.print("  {} => {}\n", .{ orig, constraint.* });
+            }
+        }
+    }
+
+    /// solve unifies the variables generated using the constraints.
+    fn solve(self: *Sema) !void {
+        if (self.debug) std.debug.print("============ UNIFICATION ===========\n", .{});
+
+        var made_progress = true;
+        while (made_progress) {
+            made_progress = false;
+
+            var to_add = std.ArrayListUnmanaged(Constraint){};
+
+            for (self.constraints.items) |constraint| {
+                // If one side is a variable then we can just use the other side whenever we see it.
+                if (constraint.lhs == .variable) {
+                    if (self.debug) self.printSub(constraint, constraint.lhs, constraint.rhs);
+
+                    made_progress = true;
+                    try self.replace(constraint.lhs.variable, constraint.rhs);
+                    try self.substitutions.append(self.arena.allocator(), .{
+                        .lhs = try constraint.lhs.clone(self.arena.allocator()),
+                        .rhs = try constraint.rhs.clone(self.arena.allocator()),
+                    });
+                    continue;
+                }
+
+                if (constraint.rhs == .variable) {
+                    if (self.debug) self.printSub(constraint, constraint.rhs, constraint.lhs);
+
+                    made_progress = true;
+                    try self.replace(constraint.rhs.variable, constraint.lhs);
+                    try self.substitutions.append(self.arena.allocator(), .{
+                        .lhs = try constraint.rhs.clone(self.arena.allocator()),
+                        .rhs = try constraint.lhs.clone(self.arena.allocator()),
+                    });
+                    continue;
+                }
+
+                // If both sides are constructors then we can generate new constraints for the arguments, but only if
+                // the constructors are the same.
+                if (constraint.lhs != .construct or constraint.rhs != .construct) continue;
+
+                var lhs = constraint.lhs.construct;
+                var rhs = constraint.rhs.construct;
+
+                if (!std.mem.eql(u8, lhs.constructor, rhs.constructor)) continue;
+                if (lhs.args.len != rhs.args.len) continue;
+
+                if (self.debug) std.debug.print("{}: Expanding\n", .{constraint});
+
+                for (lhs.args) |lhs_arg, i| {
+                    var rhs_arg = rhs.args[i];
+                    try to_add.append(self.arena.allocator(), .{
+                        .lhs = try lhs_arg.clone(self.gpa),
+                        .rhs = try rhs_arg.clone(self.gpa),
+                        .provenance = constraint.provenance,
+                    });
+
+                    if (self.debug) std.debug.print("  {} ~ {}\n", .{ lhs_arg, rhs_arg });
+                }
+
+                made_progress = true;
+            }
+
+            try self.constraints.ensureUnusedCapacity(self.gpa, to_add.items.len);
+            self.constraints.appendSliceAssumeCapacity(to_add.items);
+
+            self.pruneConstraints();
+        }
+    }
+
+    /// pruneConstraints removes any constraints that add no information, e.g. t0 ~ t0 or Int ~ Int.
+    fn pruneConstraints(self: *Sema) void {
+        var i: usize = 0;
+        while (i < self.constraints.items.len) {
+            const constraint = &self.constraints.items[i];
+            if (constraint.lhs.eql(constraint.rhs)) {
+                if (self.debug) std.debug.print("{}: Removing\n", .{constraint});
+
+                constraint.deinit(self.gpa);
+
+                _ = self.constraints.swapRemove(i);
+                continue;
+            }
+
+            i += 1;
+        }
+    }
+
     /// infer infers the type of all expressions in `program` and type checks them.
     pub fn infer(self: *Sema, program: *const parser.Program) !void {
         try self.prepopulate();
@@ -783,9 +939,12 @@ pub const Sema = struct {
                 try self.printConstraints();
             }
 
+            try self.solve();
+
             _ = self.arena.reset(.retain_capacity);
             self.expr_type_vars = .{};
             self.var_type_vars = .{};
+            self.substitutions = .{};
         }
     }
 
