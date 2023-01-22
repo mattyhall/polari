@@ -175,7 +175,7 @@ fn reorder(program: *parser.Program) !void {
     for (program.stmts.items) |stmt, i| {
         if (stmt.inner == .expression) break;
 
-        if (map.contains(stmt.inner.assignment.identifier)) return;
+        if (map.contains(stmt.inner.assignment.identifier)) return error.Redefinition;
 
         try map.put(a, stmt.inner.assignment.identifier, i);
     }
@@ -1092,6 +1092,18 @@ fn testNormalised(source: []const u8, expected: []const u8) !void {
     try testing.expectEqualStrings(expected, al.items);
 }
 
+fn testErrorNormalised(source: []const u8, e: anyerror) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
+
+    var p = parser.Parser.init(testing.allocator, l);
+    defer p.deinit();
+
+    var program = try p.parse();
+    defer program.deinit();
+
+    try testing.expectError(e, normaliseProgram(&program));
+}
+
 const TypeMapping = struct { name: []const u8, type: []const u8 };
 
 fn testTypeCheck(source: []const u8, mappings: []const TypeMapping) !void {
@@ -1170,6 +1182,10 @@ test "reorder allows functions to refer to themselves" {
     );
 }
 
+test "fail: reorder redefinition" {
+    try testErrorNormalised("a=1;a=true;", error.Redefinition);
+}
+
 test "assignments" {
     try testTypeCheck("a = b; b = 1; c = true;", &.{
         TypeMapping{ .name = "a", .type = "Int" },
@@ -1180,7 +1196,6 @@ test "assignments" {
 
 // test "fail: assignments" {
 //     try testErrorTypeCheck("a=b;");
-//     try testErrorTypeCheck("a=true;a=1;");
 // }
 
 test "maths" {
