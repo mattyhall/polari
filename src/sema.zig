@@ -496,6 +496,87 @@ const Substitution = struct {
     }
 };
 
+/// VarTypeVars holds a mapping of identifiers to typevars and the scopes that introduced them.
+const VarTypeVars = struct {
+    removed: std.ArrayListUnmanaged(struct { depth: usize, map: std.StringHashMapUnmanaged(Variable) }),
+    maps: std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Variable)),
+
+    const GetOrPutResult = std.StringHashMapUnmanaged(Variable).GetOrPutResult;
+
+    fn init(gpa: std.mem.Allocator) !VarTypeVars {
+        var maps = std.ArrayListUnmanaged(std.StringHashMapUnmanaged(Variable)){};
+        try maps.append(gpa, .{});
+        return VarTypeVars{ .removed = .{}, .maps = maps };
+    }
+
+    /// beginScope beings a new scope, creating a fresh map for variables declared in the scope.
+    fn beginScope(self: *VarTypeVars, gpa: std.mem.Allocator) !void {
+        try self.maps.append(gpa, .{});
+    }
+
+    /// get finds k in any scope, searching deepest to shallowest.
+    fn get(self: *const VarTypeVars, k: []const u8) ?Variable {
+        var i: isize = @intCast(isize, self.maps.items.len - 1);
+        while (i >= 0) : (i -= 1) {
+            const j = @intCast(usize, i);
+            if (self.maps.items[j].get(k)) |v| return v;
+        }
+
+        return null;
+    }
+
+    /// getOrPut either inserts k or returns a struct containing pointers to its entry.
+    ///
+    /// NOTE: If k is not found in any scope then it is put in the deepest (i.e. most recent one). If k is found then
+    /// it could be in any scope.
+    fn getOrPut(self: *VarTypeVars, gpa: std.mem.Allocator, k: []const u8) !GetOrPutResult {
+        var i: isize = @intCast(isize, self.maps.items.len - 1);
+        while (i >= 0) : (i -= 1) {
+            const j = @intCast(usize, i);
+            if (self.maps.items[j].contains(k)) return self.maps.items[j].getOrPut(gpa, k);
+        }
+
+        return self.maps.items[self.maps.items.len - 1].getOrPut(gpa, k);
+    }
+
+    /// put associated k with v in the deepest scope.
+    fn put(self: *VarTypeVars, gpa: std.mem.Allocator, k: []const u8, v: Variable) !void {
+        try self.maps.items[self.maps.items.len - 1].put(gpa, k, v);
+    }
+
+    /// putAssumeCapacity associates k with v in the deepest scope without allocation.
+    fn putAssumeCapacity(self: *VarTypeVars, k: []const u8, v: Variable) void {
+        self.maps.items[self.maps.items.len - 1].putAssumeCapacity(k, v);
+    }
+
+    /// ensureUnusedCapacity ensures the deepest scope has at least n unused capacity.
+    fn ensureUnusedCapacity(self: *VarTypeVars, gpa: std.mem.Allocator, n: u32) !void {
+        return self.maps.items[self.maps.items.len - 1].ensureUnusedCapacity(gpa, n);
+    }
+
+    /// endScope removes the last scope
+    fn endScope(self: *VarTypeVars, gpa: std.mem.Allocator) !void {
+        var scope = self.maps.pop();
+        try self.removed.append(gpa, .{ .depth = self.maps.items.len + 1, .map = scope });
+    }
+
+    fn printMap(map: std.StringHashMapUnmanaged(Variable)) void {
+        var it = map.iterator();
+        while (it.next()) |entry|
+            std.debug.print("{s} : t{}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+    }
+
+    fn print(self: *const VarTypeVars) void {
+        std.debug.assert(self.maps.items.len == 1);
+        printMap(self.maps.items[0]);
+
+        for (self.removed.items) |map| {
+            std.debug.print("--- depth {}", .{map.depth});
+            printMap(map.map);
+        }
+    }
+};
+
 /// Sema implements type checking of Polari code. It is done per-decl (i.e. the type of a decl depends only on its
 /// definition) and consists of two phases:
 ///   1. Give the body and its expressions type variables and _generate constraints_
@@ -513,8 +594,8 @@ pub const Sema = struct {
     /// decl_types stores the types of all decls in the program. It is allocated using `gpa`.
     decl_types: std.StringHashMapUnmanaged(Type),
 
-    /// var_type_vars stores the variable for every named thing (i.e. a variable) in the current decl.
-    var_type_vars: std.StringHashMapUnmanaged(Variable),
+    /// var_type_vars stores the typevar for every named thing (i.e. a variable) in the current decl.
+    var_type_vars: VarTypeVars,
 
     /// expr_type_vars stores the variable for every expression in the current decl.
     expr_type_vars: std.AutoHashMapUnmanaged(*const Expression, Variable),
@@ -539,7 +620,7 @@ pub const Sema = struct {
             .arena = std.heap.ArenaAllocator.init(gpa),
             .decl_types = .{},
             .expr_type_vars = .{},
-            .var_type_vars = .{},
+            .var_type_vars = undefined,
             .constraints = .{},
             .substitutions = .{},
             .next_var = 0,
@@ -554,11 +635,7 @@ pub const Sema = struct {
 
         var writer = std.io.getStdErr().writer();
 
-        {
-            var it = self.var_type_vars.iterator();
-            while (it.next()) |entry|
-                std.debug.print("{s} : t{}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-        }
+        self.var_type_vars.print();
 
         {
             var it = self.expr_type_vars.iterator();
@@ -712,23 +789,19 @@ pub const Sema = struct {
             // identifier. The identifier may be polymorphic (i.e. generic), in which case we give each generic
             // parameter a new typevar.
             .identifier => |ident| {
-                if (self.decl_types.get(ident)) |t| {
-                    const rhs = try self.typeToTypeVar(t);
-                    try self.constraints.append(self.gpa, .{
-                        .lhs = .{ .variable = tv },
-                        .rhs = rhs,
-                        .provenance = expr,
-                    });
-                    return tv;
-                }
-
-                // FIXME: Should we ever need to put here - presumably the variable exists?
-                const gop = try self.var_type_vars.getOrPut(self.arena.allocator(), ident);
-                if (!gop.found_existing) gop.value_ptr.* = self.typevar();
+                var i_tv = if (self.var_type_vars.get(ident)) |t| b: {
+                    break :b TypeVar{ .variable = t };
+                } else if (self.decl_types.get(ident)) |t| b: {
+                    break :b try self.typeToTypeVar(t);
+                } else b: {
+                    const inner_tv = self.typevar();
+                    try self.var_type_vars.put(self.arena.allocator(), ident, inner_tv);
+                    break :b TypeVar{ .variable = inner_tv };
+                };
 
                 try self.constraints.append(self.gpa, .{
                     .lhs = .{ .variable = tv },
-                    .rhs = .{ .variable = gop.value_ptr.* },
+                    .rhs = i_tv,
                     .provenance = expr,
                 });
             },
@@ -763,6 +836,8 @@ pub const Sema = struct {
             // For functions we generate a constraint that specifies that it must unify with an instance of the function
             // ("->") type and then generate a new type variable for every parameter and the return value.
             .function => |f| {
+                try self.var_type_vars.beginScope(self.arena.allocator());
+
                 var params = try std.ArrayListUnmanaged(TypeVar).initCapacity(self.gpa, f.params.len + 1);
                 errdefer params.deinit(self.gpa);
 
@@ -782,6 +857,8 @@ pub const Sema = struct {
                     .rhs = TypeVar{ .construct = .{ .constructor = "->", .args = try params.toOwnedSlice(self.gpa) } },
                     .provenance = expr,
                 });
+
+                try self.var_type_vars.endScope(self.arena.allocator());
             },
 
             // For apply we generate two constraints. The first is that this expression has the same type as the return
@@ -1003,6 +1080,8 @@ pub const Sema = struct {
         try self.prepopulate();
 
         for (program.stmts.items) |stmt| {
+            self.var_type_vars = try VarTypeVars.init(self.arena.allocator());
+
             const res = switch (stmt.inner) {
                 .assignment => |a| b: {
                     const tv = self.typevar();
@@ -1044,8 +1123,8 @@ pub const Sema = struct {
 
             _ = self.arena.reset(.retain_capacity);
             self.expr_type_vars = .{};
-            self.var_type_vars = .{};
             self.substitutions = .{};
+            self.var_type_vars = undefined;
         }
 
         if (self.constraints.items.len != 0) return error.TypeError;
@@ -1242,6 +1321,19 @@ test "functions" {
     try testTypeCheck("f = fn x => -x; g = fn x y => x + y;", &.{
         TypeMapping{ .name = "f", .type = "(-> Int Int)" },
         TypeMapping{ .name = "g", .type = "(-> Int Int Int)" },
+    });
+}
+
+test "function arguments shadowing decls/vars" {
+    try testTypeCheck("x = true; f = fn x => x + 1; y = f 2;", &.{
+        .{ .name = "x", .type = "Bool" },
+        .{ .name = "f", .type = "(-> Int Int)" },
+        .{ .name = "y", .type = "Int" },
+    });
+
+    try testTypeCheck("f = fn x => if x then (fn x => x + 1) else (fn x => x - 1); a = (f true) 1;", &.{
+        .{ .name = "f", .type = "(-> Bool (-> Int Int))" },
+        .{ .name = "a", .type = "Int" },
     });
 }
 
