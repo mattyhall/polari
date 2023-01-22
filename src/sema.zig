@@ -1040,3 +1040,59 @@ pub const Sema = struct {
 };
 
 const testing = std.testing;
+
+fn testNormalised(source: []const u8, expected: []const u8) !void {
+    var l = parser.Lexer{ .real = lexer.Lexer.init(source) };
+
+    var p = parser.Parser.init(testing.allocator, l);
+    defer p.deinit();
+
+    var program = try p.parse();
+    defer program.deinit();
+
+    try normaliseProgram(&program);
+
+    var al = std.ArrayList(u8).init(testing.allocator);
+    defer al.deinit();
+    var w = al.writer();
+
+    for (program.stmts.items) |stmt| {
+        try stmt.inner.write(w);
+    }
+
+    try testing.expectEqualStrings(expected, al.items);
+}
+
+test "reorder expressions and assignments" {
+    try testNormalised("1; a = 1;",
+        \\a = 1;
+        \\1;
+        \\
+    );
+}
+
+test "reorder assignments" {
+    try testNormalised("a = b; b = 1;",
+        \\b = 1;
+        \\a = b;
+        \\
+    );
+
+    try testNormalised("a = let b = 10; in b+2; b = 1;",
+        \\a = (let [b=10;] (+ b 2));
+        \\b = 1;
+        \\
+    );
+    try testNormalised("a = fn x y => x + y; x = 10;",
+        \\a = (fn [x y] (+ x y));
+        \\x = 10;
+        \\
+    );
+}
+
+test "reorder allows functions to refer to themselves" {
+    try testNormalised("a = fn x y => a x y;",
+        \\a = (fn [x y] (a x y));
+        \\
+    );
+}
