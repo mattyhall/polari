@@ -571,7 +571,7 @@ const VarTypeVars = struct {
         printMap(self.maps.items[0]);
 
         for (self.removed.items) |map| {
-            std.debug.print("--- depth {}", .{map.depth});
+            std.debug.print("--- depth {}\n", .{map.depth});
             printMap(map.map);
         }
     }
@@ -890,7 +890,24 @@ pub const Sema = struct {
                 ),
             },
 
-            .let => @panic("not implemented"),
+            .let => |l| {
+                try self.var_type_vars.beginScope(self.arena.allocator());
+
+                try self.var_type_vars.ensureUnusedCapacity(self.arena.allocator(), @intCast(u32, l.assignments.len));
+                for (l.assignments) |a| {
+                    const a_tv = try self.generateExprConstraints(a.inner.expression.inner);
+                    self.var_type_vars.putAssumeCapacity(a.inner.identifier, a_tv);
+                }
+
+                const in_tv = try self.generateExprConstraints(l.in.inner);
+                try self.constraints.append(self.gpa, .{
+                    .lhs = .{ .variable = tv },
+                    .rhs = .{ .variable = in_tv },
+                    .provenance = expr,
+                });
+
+                try self.var_type_vars.endScope(self.arena.allocator());
+            },
         }
 
         return tv;
@@ -1301,21 +1318,21 @@ test "boolean binops" {
     });
 }
 
-// test "let..in" {
-//     try testTypeCheck("a = let x = 5; in x * 2; b = a + 1;", &.{
-//         .{ .name = "a", .type = "Int" },
-//         .{ .name = "b", .type = "Int" },
-//     });
+test "let..in" {
+    try testTypeCheck("a = let x = 5; in x * 2; b = a + 1;", &.{
+        .{ .name = "a", .type = "Int" },
+        .{ .name = "b", .type = "Int" },
+    });
 
-//     try testTypeCheck("a = true; b = let a = false; in let a = 10; in a * 2;", &.{
-//         .{ .name = "a", .type = "Bool" },
-//         .{ .name = "b", .type = "Int" },
-//     });
-// }
+    try testTypeCheck("a = true; b = let a = false; in let a = 10; in a * 2;", &.{
+        .{ .name = "a", .type = "Bool" },
+        .{ .name = "b", .type = "Int" },
+    });
+}
 
-// test "fail: let..in" {
-//     try testErrorTypeCheck("a=1;b=let a=true; in a+2;");
-// }
+test "fail: let..in" {
+    try testErrorTypeCheck("a=1;b=let a=true; in a+2;");
+}
 
 test "functions" {
     try testTypeCheck("f = fn x => -x; g = fn x y => x + y;", &.{
