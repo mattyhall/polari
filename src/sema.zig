@@ -467,7 +467,7 @@ const Constraint = struct {
 
     /// provenance corresponds to the expression that this constraint came from. It is stored to enable error
     /// reporting.
-    provenance: *const Expression,
+    provenance: Located(*Expression),
 
     pub fn format(self: *const Constraint, comptime fmt: []const u8, opts: std.fmt.FormatOptions, writer: anytype) !void {
         _ = opts;
@@ -739,13 +739,13 @@ pub const Sema = struct {
         f: Located(*Expression),
         f_args: []Located(*Expression),
     ) error{OutOfMemory}!Variable {
-        const f_tv = try self.generateExprConstraints(f.inner);
+        const f_tv = try self.generateExprConstraints(f);
 
         var args = try std.ArrayListUnmanaged(TypeVar).initCapacity(self.gpa, f_args.len + 1);
         errdefer args.deinit(self.gpa);
 
         for (f_args) |arg| {
-            const a_tv = try self.generateExprConstraints(arg.inner);
+            const a_tv = try self.generateExprConstraints(arg);
             args.appendAssumeCapacity(.{ .variable = a_tv });
         }
 
@@ -755,13 +755,13 @@ pub const Sema = struct {
         try self.constraints.append(self.gpa, .{
             .lhs = .{ .variable = tv },
             .rhs = .{ .variable = ret_tv },
-            .provenance = f.inner,
+            .provenance = f,
         });
 
         try self.constraints.append(self.gpa, .{
             .lhs = .{ .variable = f_tv },
             .rhs = TypeVar{ .construct = .{ .constructor = "->", .args = try args.toOwnedSlice(self.gpa) } },
-            .provenance = f.inner,
+            .provenance = f,
         });
 
         return tv;
@@ -769,15 +769,15 @@ pub const Sema = struct {
 
     /// generateExprConstraints generates constraints for the given expression and returns the type variable of the
     /// expression.
-    fn generateExprConstraints(self: *Sema, expr: *const Expression) !Variable {
+    fn generateExprConstraints(self: *Sema, expr: Located(*Expression)) !Variable {
         const tv = self.typevar();
-        try self.expr_type_vars.put(self.arena.allocator(), expr, tv);
+        try self.expr_type_vars.put(self.arena.allocator(), expr.inner, tv);
 
-        switch (expr.*) {
+        switch (expr.inner.*) {
             // For builtin types we add a constraint that tv is that type.
             .integer, .boolean => try self.constraints.append(self.gpa, .{
                 .lhs = .{ .variable = tv },
-                .rhs = TypeVar{ .builtin = switch (expr.*) {
+                .rhs = TypeVar{ .builtin = switch (expr.inner.*) {
                     .integer => BuiltinType.int,
                     .boolean => BuiltinType.boolean,
                     else => unreachable,
@@ -810,14 +810,14 @@ pub const Sema = struct {
             // the `then` and the `else` types must be the same and finally a constraint saying that tv must be the
             // type of the `then` branch.
             .@"if" => |i| {
-                const c_tv = try self.generateExprConstraints(i.condition.inner);
-                const t_tv = try self.generateExprConstraints(i.then.inner);
-                const e_tv = try self.generateExprConstraints(i.@"else".inner);
+                const c_tv = try self.generateExprConstraints(i.condition);
+                const t_tv = try self.generateExprConstraints(i.then);
+                const e_tv = try self.generateExprConstraints(i.@"else");
 
                 try self.constraints.append(self.gpa, .{
                     .lhs = .{ .variable = c_tv },
                     .rhs = TypeVar{ .builtin = .boolean },
-                    .provenance = i.condition.inner,
+                    .provenance = i.condition,
                 });
 
                 try self.constraints.append(self.gpa, .{
@@ -849,7 +849,7 @@ pub const Sema = struct {
                     self.var_type_vars.putAssumeCapacity(param.inner.identifier, p_tv);
                 }
 
-                const b_tv = try self.generateExprConstraints(f.body.inner);
+                const b_tv = try self.generateExprConstraints(f.body);
                 params.appendAssumeCapacity(.{ .variable = b_tv });
 
                 try self.constraints.append(self.gpa, .{
@@ -876,7 +876,7 @@ pub const Sema = struct {
             // Binops are handled as applications.
             .unaryop => |unaryop| switch (unaryop.op) {
                 .grouping => {
-                    const g_tv = try self.generateExprConstraints(unaryop.e.inner);
+                    const g_tv = try self.generateExprConstraints(unaryop.e);
                     try self.constraints.append(self.gpa, .{
                         .lhs = .{ .variable = tv },
                         .rhs = .{ .variable = g_tv },
@@ -895,11 +895,11 @@ pub const Sema = struct {
 
                 try self.var_type_vars.ensureUnusedCapacity(self.arena.allocator(), @intCast(u32, l.assignments.len));
                 for (l.assignments) |a| {
-                    const a_tv = try self.generateExprConstraints(a.inner.expression.inner);
+                    const a_tv = try self.generateExprConstraints(a.inner.expression);
                     self.var_type_vars.putAssumeCapacity(a.inner.identifier, a_tv);
                 }
 
-                const in_tv = try self.generateExprConstraints(l.in.inner);
+                const in_tv = try self.generateExprConstraints(l.in);
                 try self.constraints.append(self.gpa, .{
                     .lhs = .{ .variable = tv },
                     .rhs = .{ .variable = in_tv },
@@ -1096,7 +1096,7 @@ pub const Sema = struct {
     pub fn infer(self: *Sema, program: *const parser.Program) !void {
         try self.prepopulate();
 
-        for (program.stmts.items) |stmt| {
+        for (program.stmts.items) |*stmt| {
             self.var_type_vars = try VarTypeVars.init(self.arena.allocator());
 
             const res = switch (stmt.inner) {
@@ -1104,16 +1104,16 @@ pub const Sema = struct {
                     const tv = self.typevar();
                     try self.var_type_vars.put(self.arena.allocator(), a.identifier, tv);
 
-                    const e_tv = try self.generateExprConstraints(a.expression.inner);
+                    const e_tv = try self.generateExprConstraints(a.expression);
                     try self.constraints.append(self.gpa, .{
                         .lhs = .{ .variable = tv },
                         .rhs = .{ .variable = e_tv },
-                        .provenance = a.expression.inner,
+                        .provenance = a.expression,
                     });
 
                     break :b tv;
                 },
-                .expression => |e| try self.generateExprConstraints(e),
+                .expression => |e| try self.generateExprConstraints(.{ .loc = stmt.loc, .inner = e }),
             };
 
             if (self.debug) {
@@ -1145,6 +1145,71 @@ pub const Sema = struct {
         }
 
         if (self.constraints.items.len != 0) return error.TypeError;
+    }
+
+    fn allocDiag(self: *Sema, located: Located(*Expression), comptime fmt: []const u8, args: anytype) !lexer.Diag {
+        return lexer.Diag{ .loc = located.loc, .msg = try std.fmt.allocPrint(self.gpa, fmt, args) };
+    }
+
+    pub fn getDiags(self: *Sema) ![]lexer.Diag {
+        var al = try std.ArrayListUnmanaged(lexer.Diag).initCapacity(self.gpa, self.constraints.items.len);
+        errdefer al.deinit(self.gpa);
+
+        for (self.constraints.items) |constraint| {
+            switch (constraint.lhs) {
+                .builtin => |lhs| switch (constraint.rhs) {
+                    .builtin => |rhs| al.appendAssumeCapacity(
+                        try self.allocDiag(constraint.provenance, "Expected {} got {}", .{ lhs, rhs }),
+                    ),
+                    .construct => |rhs| al.appendAssumeCapacity(
+                        try self.allocDiag(constraint.provenance, "Expected {}, got {s}", .{ lhs, rhs.constructor }),
+                    ),
+                    .variable => unreachable,
+                },
+                .construct => |lhs| switch (constraint.rhs) {
+                    .builtin => |rhs| al.appendAssumeCapacity(
+                        try self.allocDiag(constraint.provenance, "Expected {} got {}", .{ lhs, rhs }),
+                    ),
+                    .construct => |rhs| b: {
+                        if (!std.mem.eql(u8, lhs.constructor, rhs.constructor)) {
+                            al.appendAssumeCapacity(try self.allocDiag(
+                                constraint.provenance,
+                                "Expected a {s}, got a {s}",
+                                .{ lhs.constructor, rhs.constructor },
+                            ));
+                            break :b;
+                        }
+
+                        if (lhs.args.len != rhs.args.len) {
+                            var diff: usize = if (std.mem.eql(u8, "->", lhs.constructor)) 1 else 0;
+                            al.appendAssumeCapacity(try self.allocDiag(
+                                constraint.provenance,
+                                "Expected {} arguments to {s}, got {}",
+                                .{ lhs.args.len - diff, lhs.constructor, rhs.args.len - diff },
+                            ));
+                            break :b;
+                        }
+
+                        for (lhs.args) |lhs_arg, i| {
+                            const rhs_arg = rhs.args[i];
+                            if (lhs_arg.unifiableWith(rhs_arg)) continue;
+
+                            al.appendAssumeCapacity(try self.allocDiag(
+                                constraint.provenance,
+                                "Expected a {}, got a {} in argument {} of {s}",
+                                .{ lhs_arg, rhs_arg, i + 1, lhs.constructor },
+                            ));
+
+                            break :b;
+                        }
+                    },
+                    .variable => unreachable,
+                },
+                .variable => unreachable,
+            }
+        }
+
+        return try al.toOwnedSlice(self.gpa);
     }
 
     pub fn deinit(self: *Sema) void {

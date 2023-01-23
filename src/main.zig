@@ -320,7 +320,13 @@ pub fn main() !void {
     var s = sema.Sema.init(gpa.allocator(), opts.args.@"dump-type-checking");
     defer s.deinit();
 
-    try s.infer(&program);
+    s.infer(&program) catch {
+        var diags = try s.getDiags();
+        defer s.gpa.free(diags);
+
+        try utils.printErrors(source, diags);
+        std.os.exit(1);
+    };
 
     var c = compiler.Compiler.init(gpa.allocator(), &program);
     defer c.deinit();
