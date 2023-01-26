@@ -253,7 +253,7 @@ pub const Statement = union(enum) {
                 try ass.expression.inner.write(w);
             },
             .signature => |s| {
-                try w.print("{s} ! ", .{s.identifier});
+                try w.print("{s} : ", .{s.identifier});
                 try s.type.write(w);
             },
         }

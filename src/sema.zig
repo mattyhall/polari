@@ -144,8 +144,30 @@ fn reorder(program: *parser.Program) !void {
     // Start by sorting so that assignments are first, expressions are after.
     std.sort.sort(Located(parser.Statement), program.stmts.items, {}, struct {
         fn lt(_: void, lhs: Located(parser.Statement), rhs: Located(parser.Statement)) bool {
-            if (lhs.inner == .assignment and rhs.inner == .expression) return true;
-            return false;
+            switch (lhs.inner) {
+                .expression => switch (rhs.inner) {
+                    .expression => return false,
+                    else => return false,
+                },
+                .assignment => |a| switch (rhs.inner) {
+                    .expression => return true,
+                    .signature => |s| {
+                        if (std.mem.eql(u8, a.identifier, s.identifier)) return false;
+
+                        return std.ascii.lessThanIgnoreCase(a.identifier, s.identifier);
+                    },
+                    .assignment => |a2| return std.ascii.lessThanIgnoreCase(a.identifier, a2.identifier),
+                },
+                .signature => |s| switch (rhs.inner) {
+                    .expression => return true,
+                    .signature => |s2| return std.ascii.lessThanIgnoreCase(s.identifier, s2.identifier),
+                    .assignment => |a| {
+                        if (std.mem.eql(u8, a.identifier, s.identifier)) return true;
+
+                        return std.ascii.lessThanIgnoreCase(s.identifier, a.identifier);
+                    },
+                },
+            }
         }
     }.lt);
 
@@ -173,7 +195,7 @@ fn reorder(program: *parser.Program) !void {
     defer nodes.deinit(a);
 
     for (program.stmts.items) |stmt, i| {
-        if (stmt.inner == .expression) break;
+        if (stmt.inner == .expression or stmt.inner == .signature) break;
 
         if (map.contains(stmt.inner.assignment.identifier)) return error.Redefinition;
 
@@ -181,7 +203,7 @@ fn reorder(program: *parser.Program) !void {
     }
 
     for (program.stmts.items) |stmt, i| {
-        if (stmt.inner == .expression) break;
+        if (stmt.inner == .expression or stmt.inner == .signature) break;
 
         var deps = std.ArrayListUnmanaged([]const u8){};
         errdefer deps.deinit(a);
@@ -253,7 +275,7 @@ pub fn normaliseProgram(program: *parser.Program) !void {
         switch (stmt.inner) {
             .assignment => |a| try normaliseExpression(program.arena.allocator(), a.expression.inner),
             .expression => |e| try normaliseExpression(program.arena.allocator(), e),
-            .signature => @panic("not implemented"),
+            .signature => {},
         }
     }
 
@@ -1341,6 +1363,17 @@ test "reorder assignments" {
 test "reorder allows functions to refer to themselves" {
     try testNormalised("a = fn x y => a x y;",
         \\a = (fn [x y] (a x y));
+        \\
+    );
+}
+
+test "reorder signatures" {
+    try testNormalised("c:Bool; b : Int; b = 5; a = 1;a : Int;",
+        \\a : Int;
+        \\a = 1;
+        \\b : Int;
+        \\b = 5;
+        \\c : Bool;
         \\
     );
 }
