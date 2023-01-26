@@ -33,6 +33,7 @@ pub const Tok = union(enum) {
     lte,
     gte,
 
+    colon,
     semicolon,
     left_paren,
     right_paren,
@@ -254,6 +255,7 @@ pub const Lexer = struct {
             '-' => self.tokloc(.minus),
             '/' => self.tokloc(.forward_slash),
             '*' => self.tokloc(.asterisk),
+            ':' => self.tokloc(.colon),
             ';' => self.tokloc(.semicolon),
             '(' => self.tokloc(.left_paren),
             ')' => self.tokloc(.right_paren),
@@ -373,7 +375,8 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
         switch (item_actual) {
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
-            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => continue,
+            .equals, .plus, .minus, .forward_slash, .asterisk, .left_paren, .right_paren => continue,
+            .semicolon, .colon => continue,
             .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => continue,
             .true, .false => continue,
             .eq, .neq, .gt, .gte, .lt, .lte => continue,
@@ -441,4 +444,16 @@ test "keywords" {
 
 test "boolean logic" {
     try expectLex(testing.allocator, "= == != > < >= <=", &.{ .equals, .eq, .neq, .gt, .lt, .gte, .lte });
+}
+
+test "signatures" {
+    try expectLex(testing.allocator, "foo : fn Int a => b", &.{
+        .{ .identifier = "foo" },
+        .colon,
+        .@"fn",
+        .{ .identifier = "Int" },
+        .{ .identifier = "a" },
+        .fat_arrow,
+        .{ .identifier = "b" },
+    });
 }

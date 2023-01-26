@@ -187,9 +187,63 @@ pub const Assignment = struct {
     }
 };
 
+pub const SignatureType = union(enum) {
+    mono: []const u8,
+    construct: struct { constructor: []const u8, args: []const SignatureType },
+
+    fn eql(lhs: SignatureType, rhs: SignatureType) bool {
+        if (std.meta.activeTag(lhs) != std.meta.activeTag(rhs)) return false;
+
+        switch (lhs) {
+            .mono => |m| return std.mem.eql(u8, m, rhs.mono),
+            .construct => |c_lhs| {
+                const c_rhs = rhs.construct;
+                if (!std.mem.eql(u8, c_lhs.constructor, c_rhs.constructor)) return false;
+                if (c_lhs.args.len != c_rhs.args.len) return false;
+
+                for (c_lhs.args) |lhs_arg, i| {
+                    if (!lhs_arg.eql(c_rhs.args[i])) return false;
+                }
+
+                return true;
+            },
+        }
+    }
+
+    fn write(self: *const SignatureType, writer: anytype) !void {
+        switch (self.*) {
+            .mono => |m| try writer.writeAll(m),
+            .construct => |c| {
+                try writer.print("({s} ", .{c.constructor});
+
+                for (c.args) |arg, i| {
+                    try arg.write(writer);
+                    if (i < c.args.len - 1) try writer.writeAll(" ");
+                }
+
+                try writer.writeAll(")");
+            },
+        }
+    }
+};
+
+/// Signature represents a type signature. This makes the type of identifier to be type. The type can either be a
+/// monotype (e.g. Int, Bool etc) or a construct (e.g. [Int], Option a etc).
+pub const Signature = struct {
+    identifier: []const u8,
+    type: SignatureType,
+
+    fn eql(lhs: Signature, rhs: Signature) bool {
+        if (!std.mem.eql(u8, lhs.identifier, rhs.identifier)) return false;
+
+        return lhs.type.eql(rhs.type);
+    }
+};
+
 pub const Statement = union(enum) {
     assignment: Assignment,
     expression: *Expression,
+    signature: Signature,
 
     pub fn write(self: Statement, w: anytype) !void {
         switch (self) {
@@ -197,6 +251,10 @@ pub const Statement = union(enum) {
             .assignment => |ass| {
                 try w.print("{s} = ", .{ass.identifier});
                 try ass.expression.inner.write(w);
+            },
+            .signature => |s| {
+                try w.print("{s} ! ", .{s.identifier});
+                try s.type.write(w);
             },
         }
         try w.writeAll(";\n");
@@ -331,7 +389,7 @@ pub const Parser = struct {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
             .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
             .true, .false => {},
-            .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => {},
+            .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then, .colon => {},
             .eq, .neq, .gt, .gte, .lt, .lte => {},
         }
 
@@ -340,6 +398,91 @@ pub const Parser = struct {
 
         try self.allocDiag(tokloc.loc, "unexpected token: expected {}, got {}", .{ tok, tokloc.tok });
         return error.UnexpectedToken;
+    }
+
+    /// parseType parses a type in a signature.
+    fn parseType(self: *Parser, allow_constructors: bool) Error!SignatureType {
+        const tokloc = try self.pop();
+        switch (tokloc.tok) {
+            .identifier => |i| {
+                if (!std.ascii.isUpper(i[0]) or !allow_constructors) {
+                    return SignatureType{ .mono = i };
+                }
+
+                var args = std.ArrayListUnmanaged(SignatureType){};
+
+                while (true) {
+                    const new_tokloc = try self.peek();
+                    const ty = switch (new_tokloc.tok) {
+                        .left_paren => b: {
+                            _ = self.pop() catch unreachable;
+
+                            const ty = try self.parseType(true);
+                            try self.expect(.right_paren);
+                            break :b ty;
+                        },
+                        .identifier => |inner_i| b: {
+                            _ = self.pop() catch unreachable;
+                            break :b SignatureType{ .mono = inner_i };
+                        },
+
+                        else => break,
+                    };
+
+                    try args.append(self.program.arena.allocator(), ty);
+                }
+
+                if (args.items.len == 0) return SignatureType{ .mono = i };
+
+                return SignatureType{ .construct = .{
+                    .constructor = i,
+                    .args = try args.toOwnedSlice(self.program.arena.allocator()),
+                } };
+            },
+            .left_paren => {
+                const ty = try self.parseType(true);
+                try self.expect(.right_paren);
+                return ty;
+            },
+            .right_paren => {
+                try self.allocDiag(tokloc.loc, "unexpected token ')', expected type", .{});
+                return error.UnexpectedToken;
+            },
+            .@"fn" => {
+                var args = std.ArrayListUnmanaged(SignatureType){};
+
+                while (true) {
+                    const new_tokloc = try self.peek();
+                    const ty = switch (new_tokloc.tok) {
+                        .fat_arrow => break,
+                        else => try self.parseType(false),
+                    };
+
+                    try args.append(self.program.arena.allocator(), ty);
+                }
+
+                _ = self.pop() catch unreachable;
+
+                const ret = try self.parseType(false);
+                try args.append(self.gpa, ret);
+
+                return SignatureType{ .construct = .{
+                    .constructor = "->",
+                    .args = try args.toOwnedSlice(self.program.arena.allocator()),
+                } };
+            },
+            else => {
+                try self.allocDiag(tokloc.loc, "unexpected token {}, expected type", .{tokloc.tok});
+                return error.UnexpectedToken;
+            },
+        }
+    }
+
+    /// parseSignature parses a type signature.
+    fn parseSignature(self: *Parser, tokloc: TokLoc) Error!Signature {
+        try self.expect(.colon);
+        const ty = try self.parseType(true);
+        return Signature{ .identifier = tokloc.tok.identifier, .type = ty };
     }
 
     /// parseStatement parses a single statement.
@@ -358,6 +501,11 @@ pub const Parser = struct {
                 var ass = try self.parseAssignment(lhs_tokloc);
                 try self.expect(.semicolon);
                 break :b locate(ass.loc, Statement{ .assignment = ass.inner });
+            },
+            .colon => b: {
+                var sig = try self.parseSignature(lhs_tokloc);
+                try self.expect(.semicolon);
+                break :b locate(lhs_tokloc.loc, Statement{ .signature = sig });
             },
             else => b: {
                 var expr = try self.parseExpressionLhs(0, lhs_tokloc);
@@ -650,6 +798,7 @@ fn expectEqualParses(toks: []const lexer.Tok, expecteds: []const Statement) !voi
             .assignment => |a| if (!std.mem.eql(u8, a.identifier, expected.assignment.identifier) or
                 !a.expression.inner.eql(expected.assignment.expression.inner)) return error.TestExpectedEqual,
             .expression => |e| if (!e.eql(expected.expression)) return,
+            .signature => |s| if (!s.eql(expected.signature)) return,
         }
     }
 }
@@ -1080,6 +1229,128 @@ const Tests = struct {
                     .@"else" = locate(loc, try e(a, .{ .identifier = "c" })),
                 } })),
             } },
+        );
+    }
+
+    test "signatures" {
+        try expectEqualParse(
+            &.{ .{ .identifier = "a" }, .colon, .{ .identifier = "Int" }, .semicolon },
+            .{ .signature = .{
+                .identifier = "a",
+                .type = .{ .mono = "Int" },
+            } },
+        );
+
+        try expectEqualParse(
+            &.{ .{ .identifier = "a" }, .colon, .{ .identifier = "Madeup" }, .semicolon },
+            .{ .signature = .{
+                .identifier = "a",
+                .type = .{ .mono = "Madeup" },
+            } },
+        );
+
+        try expectEqualParse(
+            &.{ .{ .identifier = "a" }, .colon, .{ .identifier = "Option" }, .{ .identifier = "a" }, .semicolon },
+            .{ .signature = .{
+                .identifier = "a",
+                .type = .{ .construct = .{ .constructor = "Option", .args = &.{.{ .mono = "a" }} } },
+            } },
+        );
+
+        try expectEqualParse(
+            &.{
+                .{ .identifier = "a" },
+                .colon,
+                .left_paren,
+                .{ .identifier = "Option" },
+                .{ .identifier = "a" },
+                .right_paren,
+                .semicolon,
+            },
+            .{ .signature = .{
+                .identifier = "a",
+                .type = .{ .construct = .{ .constructor = "Option", .args = &.{.{ .mono = "a" }} } },
+            } },
+        );
+
+        try expectEqualParse(
+            &.{
+                .{ .identifier = "a" },
+                .colon,
+                .@"fn",
+                .{ .identifier = "Int" },
+                .fat_arrow,
+                .{ .identifier = "Int" },
+                .semicolon,
+            },
+            .{ .signature = .{
+                .identifier = "a",
+                .type = .{ .construct = .{
+                    .constructor = "->",
+                    .args = &.{ .{ .mono = "Int" }, .{ .mono = "Int" } },
+                } },
+            } },
+        );
+
+        try expectEqualParse(
+            &.{
+                .{ .identifier = "a" },
+                .colon,
+                .{ .identifier = "Option" },
+                .left_paren,
+                .@"fn",
+                .{ .identifier = "Int" },
+                .fat_arrow,
+                .{ .identifier = "Int" },
+                .right_paren,
+                .semicolon,
+            },
+            .{ .signature = .{
+                .identifier = "a",
+                .type = .{ .construct = .{
+                    .constructor = "Option",
+                    .args = &.{.{ .construct = .{
+                        .constructor = "->",
+                        .args = &.{ .{ .mono = "Int" }, .{ .mono = "Int" } },
+                    } }},
+                } },
+            } },
+        );
+    }
+
+    test "fail: signatures" {
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .{ .identifier = "a" }, .colon, .semicolon },
+        );
+
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .{ .identifier = "a" }, .colon, .{ .identifier = "Int" }, .right_paren, .semicolon },
+        );
+
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .{ .identifier = "a" }, .colon, .left_paren, .right_paren, .semicolon },
+        );
+
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .{ .identifier = "a" }, .colon, .@"fn", .{ .identifier = "Int" }, .semicolon },
+        );
+
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{
+                .{ .identifier = "a" },
+                .colon,
+                .@"fn",
+                .{ .identifier = "Int" },
+                .fat_arrow,
+                .{ .identifier = "Int" },
+                .{ .identifier = "Int" },
+                .semicolon,
+            },
         );
     }
 };

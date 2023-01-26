@@ -184,6 +184,7 @@ pub const Compiler = struct {
                     try self.compileExpression(a.expression.inner);
                     try self.writeLocal(.set, l);
                 },
+                .signature => {},
             }
         }
     }

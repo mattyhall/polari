@@ -253,6 +253,7 @@ pub fn normaliseProgram(program: *parser.Program) !void {
         switch (stmt.inner) {
             .assignment => |a| try normaliseExpression(program.arena.allocator(), a.expression.inner),
             .expression => |e| try normaliseExpression(program.arena.allocator(), e),
+            .signature => @panic("not implemented"),
         }
     }
 
@@ -1114,6 +1115,7 @@ pub const Sema = struct {
                     break :b tv;
                 },
                 .expression => |e| try self.generateExprConstraints(.{ .loc = stmt.loc, .inner = e }),
+                .signature => unreachable,
             };
 
             if (self.debug) {

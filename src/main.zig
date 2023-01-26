@@ -265,6 +265,8 @@ fn DotWriter(comptime W: anytype) type {
                             \\
                         , .{e_id});
                     },
+                    // FIXME
+                    .signature => {},
                 }
             }
 
