@@ -979,11 +979,10 @@ pub const Sema = struct {
         for (self.constraints.items) |*constraint| {
             var orig = constraint.*;
 
-            if ((try self.replaceTypeVar(&constraint.lhs, to_be_replaced, with) or
-                try self.replaceTypeVar(&constraint.rhs, to_be_replaced, with)) and self.debug)
-            {
-                if (self.debug) std.debug.print("  {} => {}\n", .{ orig, constraint.* });
-            }
+            var replaced = try self.replaceTypeVar(&constraint.lhs, to_be_replaced, with);
+            replaced = try self.replaceTypeVar(&constraint.rhs, to_be_replaced, with) or replaced;
+
+            if (replaced and self.debug) std.debug.print("  {} => {}\n", .{ orig, constraint.* });
         }
     }
 
@@ -1115,29 +1114,93 @@ pub const Sema = struct {
         return (try self.findAndGenerateTypeInner(v, &generics)) orelse unreachable;
     }
 
+    /// generateAssignmentConstraints generates constraints for the given assignment.
+    fn generateAssignmentConstraints(self: *Sema, a: parser.Assignment) !Variable {
+        const tv = self.typevar();
+        try self.var_type_vars.put(self.arena.allocator(), a.identifier, tv);
+
+        const e_tv = try self.generateExprConstraints(a.expression);
+        try self.constraints.append(self.gpa, .{
+            .lhs = .{ .variable = tv },
+            .rhs = .{ .variable = e_tv },
+            .provenance = a.expression,
+        });
+
+        return tv;
+    }
+
+    /// signatureTypeToTypeVar takes a type from a signature and converts it to a typevar.
+    fn signatureTypeToTypeVar(self: *Sema, s: parser.SignatureType) !TypeVar {
+        switch (s) {
+            .mono => |m| return if (std.mem.eql(u8, m, "Int"))
+                TypeVar{ .builtin = BuiltinType.int }
+            else if (std.mem.eql(u8, m, "Bool"))
+                TypeVar{ .builtin = BuiltinType.boolean }
+            else if (std.ascii.isLower(m[0]))
+                // FIXME: we need this to not be unifiable with any concrete type
+                TypeVar{ .variable = self.typevar() }
+            else
+                return error.TypeNotFound,
+            .construct => |c| {
+                var args = try self.gpa.alloc(TypeVar, c.args.len);
+                errdefer self.gpa.free(args);
+
+                for (c.args) |arg, i| {
+                    args[i] = try self.signatureTypeToTypeVar(arg);
+                }
+
+                return TypeVar{ .construct = .{ .constructor = c.constructor, .args = args } };
+            },
+        }
+    }
+
+    /// generateSignatureConstraints generates constraints for the given signature. We do this by generating a new
+    /// typevar for whatever has the signature and then add constraints for it given the signature.
+    fn generateSignatureConstraints(self: *Sema, s: parser.Signature) !Variable {
+        const tv = self.typevar();
+        const t = try self.signatureTypeToTypeVar(s.type);
+
+        // FIXME: provenance
+        try self.constraints.append(self.gpa, .{ .lhs = .{ .variable = tv }, .rhs = t, .provenance = undefined });
+
+        return tv;
+    }
+
     /// infer infers the type of all expressions in `program` and type checks them.
     pub fn infer(self: *Sema, program: *const parser.Program) !void {
         try self.prepopulate();
 
-        for (program.stmts.items) |*stmt| {
+        var i: usize = 0;
+        while (i < program.stmts.items.len) : (i += 1) {
+            var stmt = program.stmts.items[i];
+
             self.var_type_vars = try VarTypeVars.init(self.arena.allocator());
 
             const res = switch (stmt.inner) {
-                .assignment => |a| b: {
-                    const tv = self.typevar();
-                    try self.var_type_vars.put(self.arena.allocator(), a.identifier, tv);
+                .assignment => |a| try self.generateAssignmentConstraints(a),
+                .expression => |e| try self.generateExprConstraints(.{ .loc = stmt.loc, .inner = e }),
+                .signature => |s| b: {
+                    if (i == program.stmts.items.len - 1)
+                        return error.FloatingBinding;
 
-                    const e_tv = try self.generateExprConstraints(a.expression);
+                    const a = switch (program.stmts.items[i + 1].inner) {
+                        .expression, .signature => return error.FloatingBinding,
+                        .assignment => |a| a,
+                    };
+
+                    const a_tv = try self.generateAssignmentConstraints(a);
+                    const tv = try self.generateSignatureConstraints(s);
+
                     try self.constraints.append(self.gpa, .{
-                        .lhs = .{ .variable = tv },
-                        .rhs = .{ .variable = e_tv },
+                        .lhs = .{ .variable = a_tv },
+                        .rhs = .{ .variable = tv },
                         .provenance = a.expression,
                     });
 
-                    break :b tv;
+                    i += 1;
+
+                    break :b a_tv;
                 },
-                .expression => |e| try self.generateExprConstraints(.{ .loc = stmt.loc, .inner = e }),
-                .signature => unreachable,
             };
 
             if (self.debug) {
@@ -1157,6 +1220,7 @@ pub const Sema = struct {
             var ty = try self.findAndGenerateType(res);
             switch (stmt.inner) {
                 .assignment => |a| try self.decl_types.put(self.gpa, a.identifier, ty),
+                .signature => |s| try self.decl_types.put(self.gpa, s.identifier, ty),
                 else => {},
             }
 
@@ -1502,4 +1566,27 @@ test "polymorphic functions" {
             .{ .name = "p", .type = "Int" },
         },
     );
+}
+
+test "signatures" {
+    try testTypeCheck("a : Int; a = 5; b : Bool; b = true;", &.{
+        .{ .name = "a", .type = "Int" },
+        .{ .name = "b", .type = "Bool" },
+    });
+
+    try testTypeCheck("id : fn Int => Int; id = fn a => a; x = id 1;", &.{
+        .{ .name = "id", .type = "(-> Int Int)" },
+        .{ .name = "x", .type = "Int" },
+    });
+
+    try testTypeCheck("id : fn a => a; id = fn a => a; x = id 1; y = id true;", &.{
+        .{ .name = "id", .type = "(-> g0 g0)" },
+        .{ .name = "x", .type = "Int" },
+        .{ .name = "y", .type = "Bool" },
+    });
+}
+
+test "fail: type signatures" {
+    try testErrorTypeCheck("a : Int; a = true;");
+    try testErrorTypeCheck("id : fn Int => Int; id = fn a => a; x = id true;");
 }
