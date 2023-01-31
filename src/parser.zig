@@ -227,6 +227,40 @@ pub const SignatureType = union(enum) {
     }
 };
 
+/// Variant is a union variant.
+pub const Variant = struct { name: []const u8, type: []const u8 };
+
+/// TypeDefinition represents when a new type is introduced.
+pub const TypeDefinition = union(enum) {
+    /// union is a sum type, also known as a tagged union.
+    @"union": struct {
+        variables: []const []const u8,
+        variants: []const Variant,
+    },
+
+    fn eql(self: TypeDefinition, other: TypeDefinition) bool {
+        if (std.meta.activeTag(self) != std.meta.activeTag(other)) return false;
+
+        switch (self) {
+            .@"union" => |lhs| {
+                var rhs = other.@"union";
+                if (lhs.variables.len != rhs.variables.len or lhs.variants.len != rhs.variants.len) return false;
+
+                for (lhs.variables) |lhs_v, i|
+                    if (!std.mem.eql(u8, lhs_v, rhs.variables[i])) return false;
+
+                for (lhs.variants) |lhs_v, i| {
+                    var rhs_v = rhs.variants[i];
+                    if (!std.mem.eql(u8, lhs_v.name, rhs_v.name)) return false;
+                    if (!std.mem.eql(u8, lhs_v.type, rhs_v.type)) return false;
+                }
+            },
+        }
+
+        return true;
+    }
+};
+
 /// Signature represents a type signature. This makes the type of identifier to be type. The type can either be a
 /// monotype (e.g. Int, Bool etc) or a construct (e.g. [Int], Option a etc).
 pub const Signature = struct {
@@ -244,6 +278,7 @@ pub const Statement = union(enum) {
     assignment: Assignment,
     expression: *Expression,
     signature: Signature,
+    typedef: struct { identifier: []const u8, def: TypeDefinition },
 
     pub fn write(self: Statement, w: anytype) !void {
         switch (self) {
@@ -255,6 +290,24 @@ pub const Statement = union(enum) {
             .signature => |s| {
                 try w.print("{s} : ", .{s.identifier});
                 try s.type.write(w);
+            },
+            .typedef => |t| {
+                try w.print("{s} = ", .{t.identifier});
+                switch (t.def) {
+                    .@"union" => |u| {
+                        try w.writeAll("(union [");
+                        for (u.variables) |v, i| {
+                            try w.writeAll(v);
+                            if (i < u.variables.len - 1) try w.writeAll(" ");
+                        }
+                        try w.writeAll("] { ");
+
+                        for (u.variants) |v| {
+                            try w.print("{s} : {s}; ", .{ v.name, v.type });
+                        }
+                        try w.writeAll("})");
+                    },
+                }
             },
         }
         try w.writeAll(";\n");
@@ -387,10 +440,12 @@ pub const Parser = struct {
     fn expect(self: *Parser, comptime tok: lexer.Tok) Error!void {
         switch (tok) {
             .identifier, .integer => @compileError("expect must be used with a token without a payload"),
-            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .left_paren, .right_paren => {},
+            .equals, .plus, .minus, .forward_slash, .asterisk, .semicolon, .colon => {},
+            .left_paren, .right_paren, .left_curly, .right_curly => {},
             .true, .false => {},
-            .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then, .colon => {},
+            .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => {},
             .eq, .neq, .gt, .gte, .lt, .lte => {},
+            .@"union" => {},
         }
 
         const tokloc = try self.pop();
@@ -485,6 +540,59 @@ pub const Parser = struct {
         return Signature{ .identifier = tokloc.tok.identifier, .type = ty };
     }
 
+    /// parseUnion parses an introduction of a union type.
+    fn parseUnion(self: *Parser, identifier: TokLoc) Error!Statement {
+        var a = self.program.arena.allocator();
+
+        var args = std.ArrayListUnmanaged([]const u8){};
+        while (true) {
+            var next = try self.pop();
+            switch (next.tok) {
+                .identifier => |i| try args.append(a, i),
+                .fat_arrow => break,
+                else => {
+                    try self.allocDiag(next.loc, "unexpected token {}, expected identifier or '=>'", .{next.tok});
+                    return error.UnexpectedToken;
+                },
+            }
+        }
+
+        try self.expect(.left_curly);
+
+        var variants = std.ArrayListUnmanaged(Variant){};
+        while (true) {
+            const tokloc = try self.pop();
+            var name = switch (tokloc.tok) {
+                .identifier => |i| i,
+                .right_curly => break,
+                else => {
+                    try self.allocDiag(tokloc.loc, "unexpected token {}, expected identifier or '}}'", .{tokloc.tok});
+                    return error.UnexpectedToken;
+                },
+            };
+
+            try self.expect(.colon);
+
+            const tokloc2 = try self.pop();
+            if (tokloc2.tok != .identifier) {
+                try self.allocDiag(tokloc.loc, "unexpected token {}, expected type", .{tokloc.tok});
+                return error.UnexpectedToken;
+            }
+
+            try variants.append(a, .{ .name = name, .type = tokloc2.tok.identifier });
+
+            try self.expect(.semicolon);
+        }
+
+        return Statement{ .typedef = .{
+            .identifier = identifier.tok.identifier,
+            .def = .{ .@"union" = .{
+                .variables = try args.toOwnedSlice(a),
+                .variants = try variants.toOwnedSlice(a),
+            } },
+        } };
+    }
+
     /// parseStatement parses a single statement.
     fn parseStatement(self: *Parser) Error!Located(Statement) {
         const lhs_tokloc = try self.pop();
@@ -498,9 +606,20 @@ pub const Parser = struct {
         const op_tokloc = try self.peek();
         return switch (op_tokloc.tok) {
             .equals => b: {
-                var ass = try self.parseAssignment(lhs_tokloc);
+                _ = self.pop() catch unreachable;
+
+                const next = try self.peek();
+                var s = if (next.tok == .@"union") i: {
+                    _ = self.pop() catch unreachable;
+                    break :i try self.parseUnion(lhs_tokloc);
+                } else i: {
+                    var ass = try self.parseAssignment(lhs_tokloc);
+                    break :i Statement{ .assignment = ass.inner };
+                };
+
                 try self.expect(.semicolon);
-                break :b locate(ass.loc, Statement{ .assignment = ass.inner });
+
+                break :b locate(lhs_tokloc.loc, s);
             },
             .colon => b: {
                 var sig = try self.parseSignature(lhs_tokloc);
@@ -519,8 +638,6 @@ pub const Parser = struct {
     ///
     /// NOTE: does not parse the trailing semicolon.
     fn parseAssignment(self: *Parser, lhs: TokLoc) Error!Located(Assignment) {
-        try self.expect(.equals);
-
         if (lhs.tok != .identifier) {
             try self.allocDiag(lhs.loc, "unexpected token: cannot assign to a {}", .{lhs.tok});
             return error.UnexpectedToken;
@@ -546,13 +663,12 @@ pub const Parser = struct {
 
         var i: usize = 0;
         while (true) : (i += 1) {
-            const first = try self.peek();
-            if (first.tok == .in) {
-                _ = try self.pop();
-                break;
-            }
+            const first = try self.pop();
+            if (first.tok == .in) break;
 
-            var ass = try self.parseAssignment(self.pop() catch unreachable);
+            try self.expect(.equals);
+
+            var ass = try self.parseAssignment(first);
             try al.append(self.program.arena.allocator(), ass);
 
             const tokloc = try self.pop();
@@ -799,6 +915,8 @@ fn expectEqualParses(toks: []const lexer.Tok, expecteds: []const Statement) !voi
                 !a.expression.inner.eql(expected.assignment.expression.inner)) return error.TestExpectedEqual,
             .expression => |e| if (!e.eql(expected.expression)) return,
             .signature => |s| if (!s.eql(expected.signature)) return,
+            .typedef => |t| if (!std.mem.eql(u8, t.identifier, expected.typedef.identifier) or
+                !t.def.eql(expected.typedef.def)) return,
         }
     }
 }
@@ -1349,6 +1467,92 @@ const Tests = struct {
                 .fat_arrow,
                 .{ .identifier = "Int" },
                 .{ .identifier = "Int" },
+                .semicolon,
+            },
+        );
+    }
+
+    test "unions" {
+        try expectEqualParse(
+            &.{
+                .{ .identifier = "Basic" },
+                .equals,
+                .@"union",
+                .fat_arrow,
+                .left_curly,
+                .{ .identifier = "Integer" },
+                .colon,
+                .{ .identifier = "Int" },
+                .semicolon,
+                .{ .identifier = "Boolean" },
+                .colon,
+                .{ .identifier = "Bool" },
+                .semicolon,
+                .right_curly,
+                .semicolon,
+            },
+            .{ .typedef = .{
+                .identifier = "a",
+                .def = .{ .@"union" = .{
+                    .variables = &.{},
+                    .variants = &.{
+                        .{ .name = "Integer", .type = "Int" },
+                        .{ .name = "Boolean", .type = "Bool" },
+                    },
+                } },
+            } },
+        );
+
+        try expectEqualParse(
+            &.{
+                .{ .identifier = "Option" },
+                .equals,
+                .@"union",
+                .{ .identifier = "a" },
+                .fat_arrow,
+                .left_curly,
+                .{ .identifier = "Some" },
+                .colon,
+                .{ .identifier = "a" },
+                .semicolon,
+                .{ .identifier = "None" },
+                .colon,
+                .{ .identifier = "void" },
+                .semicolon,
+                .right_curly,
+                .semicolon,
+            },
+            .{ .typedef = .{
+                .identifier = "Option",
+                .def = .{ .@"union" = .{
+                    .variables = &.{"a"},
+                    .variants = &.{
+                        .{ .name = "Some", .type = "a" },
+                        .{ .name = "None", .type = "void" },
+                    },
+                } },
+            } },
+        );
+    }
+
+    test "fail: unions" {
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{ .{ .identifier = "a" }, .equals, .@"union", .semicolon },
+        );
+
+        try expectFailParse(
+            error.UnexpectedToken,
+            &.{
+                .{ .identifier = "Option" },
+                .equals,
+                .@"union",
+                .left_curly,
+                .{ .identifier = "None" },
+                .colon,
+                .{ .identifier = "void" },
+                .semicolon,
+                .right_curly,
                 .semicolon,
             },
         );

@@ -98,6 +98,31 @@ c : A|B
 c = record { a = 10; b = true; s = "hello"; };
 ----
 
+=== Unions
+
+[source]
+---
+// Unions can be simple enumerations
+Animal = union => {
+  Dog: void;
+  Cat: void;
+};
+
+// Or they can contain data
+JsonValue = union => {
+  Integer: Int;
+  Boolean: Bool;
+};
+
+// They can even be polymorphic
+Option = union a => {
+  Some: a;
+  None: void;
+};
+
+x : Option Int;
+x = Option.Some 10;
+---
 
 == Statements
 

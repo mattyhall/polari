@@ -157,6 +157,7 @@ fn reorder(program: *parser.Program) !void {
                         return std.ascii.lessThanIgnoreCase(a.identifier, s.identifier);
                     },
                     .assignment => |a2| return std.ascii.lessThanIgnoreCase(a.identifier, a2.identifier),
+                    .typedef => return false,
                 },
                 .signature => |s| switch (rhs.inner) {
                     .expression => return true,
@@ -166,6 +167,11 @@ fn reorder(program: *parser.Program) !void {
 
                         return std.ascii.lessThanIgnoreCase(s.identifier, a.identifier);
                     },
+                    .typedef => return false,
+                },
+                .typedef => |t| switch (rhs.inner) {
+                    .expression, .signature, .assignment => return true,
+                    .typedef => |t2| return std.ascii.lessThanIgnoreCase(t.identifier, t2.identifier),
                 },
             }
         }
@@ -195,7 +201,7 @@ fn reorder(program: *parser.Program) !void {
     defer nodes.deinit(a);
 
     for (program.stmts.items) |stmt, i| {
-        if (stmt.inner == .expression or stmt.inner == .signature) break;
+        if (stmt.inner == .expression or stmt.inner == .signature or stmt.inner == .typedef) break;
 
         if (map.contains(stmt.inner.assignment.identifier)) return error.Redefinition;
 
@@ -203,7 +209,7 @@ fn reorder(program: *parser.Program) !void {
     }
 
     for (program.stmts.items) |stmt, i| {
-        if (stmt.inner == .expression or stmt.inner == .signature) break;
+        if (stmt.inner == .expression or stmt.inner == .signature or stmt.inner == .typedef) break;
 
         var deps = std.ArrayListUnmanaged([]const u8){};
         errdefer deps.deinit(a);
@@ -276,6 +282,7 @@ pub fn normaliseProgram(program: *parser.Program) !void {
             .assignment => |a| try normaliseExpression(program.arena.allocator(), a.expression.inner),
             .expression => |e| try normaliseExpression(program.arena.allocator(), e),
             .signature => {},
+            .typedef => {},
         }
     }
 
@@ -1184,7 +1191,7 @@ pub const Sema = struct {
                         return error.FloatingBinding;
 
                     const a = switch (program.stmts.items[i + 1].inner) {
-                        .expression, .signature => return error.FloatingBinding,
+                        .expression, .signature, .typedef => return error.FloatingBinding,
                         .assignment => |a| a,
                     };
 
@@ -1201,6 +1208,7 @@ pub const Sema = struct {
 
                     break :b a_tv;
                 },
+                .typedef => @panic("unreachable"),
             };
 
             if (self.debug) {

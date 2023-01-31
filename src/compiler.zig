@@ -185,6 +185,7 @@ pub const Compiler = struct {
                     try self.writeLocal(.set, l);
                 },
                 .signature => {},
+                .typedef => {},
             }
         }
     }

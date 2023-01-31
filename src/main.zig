@@ -241,6 +241,29 @@ fn DotWriter(comptime W: anytype) type {
             return s_id;
         }
 
+        fn writeTypeDefinition(self: *Self, def: parser.TypeDefinition) !u64 {
+            const d_id = self.id();
+            switch (def) {
+                .@"union" => |u| {
+                    try self.w.print(
+                        \\ u_{} [label="union",color="white",fontcolor="white"]
+                    ,
+                        .{d_id},
+                    );
+
+                    for (u.variants) |v| {
+                        const v_id = self.id();
+                        try self.w.print(
+                            \\ v_{} [label="{s}:{s}",color="white",fontcolor="white"]
+                            \\ u_{} -- v_{} [color="white"]
+                        , .{ v_id, v.name, v.type, d_id, v_id });
+                    }
+                },
+            }
+
+            return d_id;
+        }
+
         fn write(self: *Self, program: *const parser.Program) !void {
             try self.w.writeAll(
                 \\strict graph {
@@ -264,6 +287,22 @@ fn DotWriter(comptime W: anytype) type {
                             \\  root -- e_{} [color="white"]
                             \\
                         , .{e_id});
+                    },
+                    .typedef => |t| {
+                        const i_id = self.id();
+
+                        try self.w.print(
+                            \\  i_{[i_id]} [label="{[name]s}",color="white",fontcolor="white"]
+                            \\
+                        , .{ .i_id = i_id, .name = t.identifier });
+
+                        const d_id = try self.writeTypeDefinition(t.def);
+                        try self.w.print(
+                            \\ i_{} -- d_{} [color="white"]
+                            \\
+                        ,
+                            .{ i_id, d_id },
+                        );
                     },
                     // FIXME
                     .signature => {},

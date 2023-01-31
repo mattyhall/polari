@@ -37,6 +37,8 @@ pub const Tok = union(enum) {
     semicolon,
     left_paren,
     right_paren,
+    left_curly,
+    right_curly,
 
     let,
     in,
@@ -46,6 +48,8 @@ pub const Tok = union(enum) {
     elif,
     @"else",
     then,
+
+    @"union",
 };
 
 /// Loc represents a locaiton in the source code. It is in a human-readable format - i.e. line and col start at 1.
@@ -259,6 +263,8 @@ pub const Lexer = struct {
             ';' => self.tokloc(.semicolon),
             '(' => self.tokloc(.left_paren),
             ')' => self.tokloc(.right_paren),
+            '{' => self.tokloc(.left_curly),
+            '}' => self.tokloc(.right_curly),
             'e' => {
                 if (self.index + 2 >= self.source.len or self.source[self.index + 1] != 'l')
                     return try self.parseIdentifier();
@@ -298,6 +304,7 @@ pub const Lexer = struct {
                     else => try self.parseIdentifier(),
                 };
             },
+            'u' => try self.parseKeyword("union", .@"union"),
             else => {
                 if ((c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z')) return try self.parseIdentifier();
 
@@ -375,10 +382,11 @@ fn expectLex(gpa: std.mem.Allocator, source: []const u8, expected: []const Tok) 
         switch (item_actual) {
             .identifier => |s| if (std.mem.eql(u8, s, item_expected.identifier)) continue,
             .integer => |int| if (int == item_expected.integer) continue,
-            .equals, .plus, .minus, .forward_slash, .asterisk, .left_paren, .right_paren => continue,
+            .equals, .plus, .minus, .forward_slash, .asterisk => continue,
+            .left_paren, .right_paren, .left_curly, .right_curly => continue,
             .semicolon, .colon => continue,
             .let, .in, .@"fn", .fat_arrow, .@"if", .@"else", .elif, .then => continue,
-            .true, .false => continue,
+            .true, .false, .@"union" => continue,
             .eq, .neq, .gt, .gte, .lt, .lte => continue,
         }
 
