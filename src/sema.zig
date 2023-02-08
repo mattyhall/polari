@@ -376,6 +376,20 @@ const Type = union(enum) {
         }
     }
 
+    fn clone(self: *const Type, gpa: std.mem.Allocator) !Type {
+        switch (self.*) {
+            .construct => |c| {
+                var args = try gpa.alloc(Type, c.args.len);
+                errdefer gpa.free(args);
+
+                for (c.args) |arg, i| args[i] = try arg.clone(gpa);
+
+                return Type{ .construct = .{ .constructor = c.constructor, .args = args } };
+            },
+            else => return self.*,
+        }
+    }
+
     fn deinit(self: *Type, gpa: std.mem.Allocator) void {
         switch (self.*) {
             .construct => |c| {
@@ -638,6 +652,9 @@ pub const Sema = struct {
     /// substitutions is a list of all substitutions for the current decl.
     substitutions: std.ArrayListUnmanaged(Substitution),
 
+    /// types is a hashmap of types defined in the current compilation unit.
+    types: std.StringHashMapUnmanaged(Type),
+
     /// next_var holds the next typevar to give out.
     next_var: usize,
 
@@ -653,6 +670,7 @@ pub const Sema = struct {
             .var_type_vars = undefined,
             .constraints = .{},
             .substitutions = .{},
+            .types = .{},
             .next_var = 0,
             .debug = debug,
         };
@@ -1208,7 +1226,53 @@ pub const Sema = struct {
 
                     break :b a_tv;
                 },
-                .typedef => @panic("unreachable"),
+                .typedef => |t| switch (t.def) {
+                    .@"union" => |u| {
+                        var generics = std.StringArrayHashMapUnmanaged(Variable){};
+                        try generics.ensureUnusedCapacity(self.arena.allocator(), u.variables.len);
+
+                        var ty = b: {
+                            var args = try self.gpa.alloc(Type, u.variables.len);
+                            errdefer self.gpa.free(args);
+
+                            for (u.variables) |v, j| {
+                                generics.putAssumeCapacity(v, j);
+                                args[j] = .{ .generic = j };
+                            }
+
+                            var ty = Type{ .construct = .{ .constructor = t.identifier, .args = args } };
+
+                            try self.types.put(self.gpa, t.identifier, try ty.clone(self.gpa));
+                            break :b ty;
+                        };
+                        defer ty.deinit(self.gpa);
+
+                        for (u.variants) |variant| {
+                            if (self.decl_types.contains(variant.name)) return error.NameInUse;
+
+                            var args = try self.gpa.alloc(Type, 2);
+                            errdefer self.gpa.free(args);
+
+                            // TODO: What about user and invalid types?
+                            args[0] = if (std.mem.eql(u8, variant.type, "Int"))
+                                Type{ .builtin = .int }
+                            else if (std.mem.eql(u8, variant.type, "Bool"))
+                                Type{ .builtin = .boolean }
+                            else b: {
+                                var g = generics.get(variant.type) orelse return error.UndefinedVariabled;
+                                break :b Type{ .generic = g };
+                            };
+
+                            args[1] = try ty.clone(self.gpa);
+
+                            try self.decl_types.put(self.gpa, variant.name, .{ .construct = .{
+                                .constructor = "->",
+                                .args = args,
+                            } });
+                        }
+                        continue;
+                    },
+                },
             };
 
             if (self.debug) {
@@ -1318,6 +1382,15 @@ pub const Sema = struct {
             }
 
             self.decl_types.deinit(self.gpa);
+        }
+
+        {
+            var it = self.types.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.gpa);
+            }
+
+            self.types.deinit(self.gpa);
         }
 
         for (self.constraints.items) |*c| c.deinit(self.gpa);
@@ -1597,4 +1670,21 @@ test "signatures" {
 test "fail: type signatures" {
     try testErrorTypeCheck("a : Int; a = true;");
     try testErrorTypeCheck("id : fn Int => Int; id = fn a => a; x = id true;");
+}
+
+test "unions" {
+    try testTypeCheck(
+        \\Option = union a => {
+        \\    Some: a;
+        \\    None: Bool;
+        \\};
+        \\x = Some 10;
+        \\y = None true;
+        \\z : Option Int;
+        \\z = None true;
+    , &.{
+        .{ .name = "x", .type = "(Option Int)" },
+        .{ .name = "y", .type = "(Option g0)" },
+        .{ .name = "z", .type = "(Option Int)" },
+    });
 }
